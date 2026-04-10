@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de máquinas virtuales</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- Estilos Base --- */
+        :root { --bg-dark: #0f172a; --bg-card: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --primary: #3b82f6; --primary-hover: #2563eb; --accent: #10b981; --accent-hover: #059669; --border: #334155; --danger: #ef4444; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body { background-color: var(--bg-dark); color: var(--text-main); padding: 2rem; line-height: 1.6; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { font-size: 2rem; margin-bottom: 2rem; border-bottom: 2px solid var(--border); padding-bottom: 1rem; }
+        h2 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+        section { background-color: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; margin-bottom: 2rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+
+        /* --- Formularios --- */
+        .form-group { margin-bottom: 1.5rem; }
+        label { display: block; margin-bottom: 0.5rem; color: var(--text-muted); font-weight: 500; }
+        input[type="text"], select { width: 100%; padding: 0.75rem; background-color: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: var(--text-main); font-size: 1rem; }
+        input:focus, select:focus { outline: none; border-color: var(--primary); }
+
+        /* --- Botones de Plantilla --- */
+        .template-options { display: flex; gap: 1rem; margin-top: 0.5rem; }
+        .btn-template { display: flex; align-items: center; justify-content: center; gap: 0.5rem; flex: 1; padding: 0.85rem; background-color: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: var(--text-main); font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        .btn-template:hover { border-color: var(--primary); background-color: rgba(59, 130, 246, 0.05); }
+        .btn-template.selected { border-color: var(--primary); background-color: rgba(59, 130, 246, 0.1); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+        .icon-lm { color: var(--primary); }
+        .icon-deb { color: var(--danger); }
+
+        /* --- Botones Generales --- */
+        .btn { padding: 0.5rem 1rem; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 0.85rem; text-decoration: none; display: inline-block;}
+        .btn-primary { background-color: var(--primary); color: white; }
+        .btn-primary:hover { background-color: var(--primary-hover); }
+        .btn-secondary { background-color: transparent; border: 1px solid var(--primary); color: var(--primary); }
+        .btn-secondary:hover { background-color: rgba(59, 130, 246, 0.1); }
+        .btn-accent { background-color: var(--accent); color: white; }
+        .btn-danger { background-color: var(--danger); color: white; }
+        .btn:disabled { background-color: #334155; color: #94a3b8; cursor: not-allowed; border: 1px solid #475569; }
+
+        /* --- Tabla --- */
+        .table-responsive { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th, td { padding: 1rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 0.85rem; }
+        .actions-cell { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+        .alert { padding: 1rem; background-color: rgba(239, 68, 68, 0.2); border-left: 4px solid var(--danger); margin-bottom: 1.5rem; border-radius: 4px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Gestión de máquinas virtuales</h1>
+
+    {{if .Error}}
+    <div class="alert">{{.Error}}</div>
+    {{end}}
+
+    <section>
+        <h2>Agregar plantilla para mv</h2>
+        <form action="/add" method="POST" id="form-plantilla">
+            <div class="form-group">
+                <label for="nombre">Nombre de la nueva plantilla</label>
+                <input type="text" id="nombre" name="nombre" required placeholder="Ej: UbuntuServer22">
+            </div>
+
+            <div class="form-group">
+                <label for="descripcion">Descripcion</label>
+                <input type="text" id="descripcion" name="descripcion" required placeholder="Ej: Servidor Web">
+            </div>
+
+            <div class="form-group">
+                <label>Seleccionar plantilla base</label>
+                <input type="hidden" id="base" name="base" value="">
+
+                <div class="template-options">
+                    <button class="btn-template" type="button" onclick="seleccionarBase('LinuxMint', this)">
+                        <span class="icon-lm">LM</span> Linux Mint
+                    </button>
+                    <button class="btn-template" type="button" onclick="seleccionarBase('Debian13Clon', this)">
+                        <span class="icon-deb">D13</span> Debian 13
+                    </button>
+                </div>
+                <small id="error-base" style="color: var(--danger); display: none; margin-top: 0.5rem;">Por favor, selecciona una plantilla base haciendo clic en uno de los botones.</small>
+            </div>
+
+            <button type="submit" class="btn btn-primary" style="font-size: 1rem; padding: 0.75rem 1.5rem; margin-top: 1rem;">Guardar Plantilla</button>
+        </form>
+    </section>
+
+    <section>
+        <h2>Dashboard de Plantillas Creadas</h2>
+        <div class="table-responsive">
+            <table>
+                <thead>
+                <tr>
+                    <th>Nombre</th>
+                    <th>Descripción</th>
+                    <th>Base</th>
+                    <th>Llave Root</th>
+                    <th>Acciones</th>
+                </tr>
+                </thead>
+                <tbody>
+                {{range .Templates}}
+                <tr>
+                    <td><strong>{{.Nombre}}</strong></td>
+                    <td>{{.Descripcion}}</td>
+                    <td>{{.PlantillaBase}}</td>
+                    <td>{{if .LlaveGenerada}}{{.NombreLlave}}{{else}}<em style="color: #94a3b8">Pendiente</em>{{end}}</td>
+                    <td class="actions-cell">
+                        <form action="/create-key" method="POST" style="display:inline;">
+                            <input type="hidden" name="nombre" value="{{.Nombre}}">
+                            <button type="submit" class="btn btn-secondary" {{if .LlaveGenerada}}disabled{{end}}>Crear Llaves</button>
+                        </form>
+
+                        {{if .LlaveGenerada}}
+                        <a href="/download-key?nombre={{.NombreLlave}}" class="btn btn-accent">Descargar Llaves</a>
+                        {{else}}
+                        <button class="btn" disabled>Descargar Llaves</button>
+                        {{end}}
+                    </td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="5" style="text-align: center; color: var(--text-muted);">No hay plantillas creadas.</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section>
+        <h2>Gestión de Discos Compartidos</h2>
+
+        <form action="/create-disk" method="POST" style="background-color: var(--bg-dark); padding: 1.5rem; border-radius: 8px; margin-bottom: 2rem;">
+            <h3>Crear Nuevo Disco</h3>
+
+            <div class="form-group" style="margin-top: 1rem;">
+                <label for="nombre_disco">Nombre del Disco</label>
+                <input type="text" id="nombre_disco" name="nombre_disco" required placeholder="Ej: DiscoDB_1">
+            </div>
+
+            <div class="form-group">
+                <label for="plantilla_origen">Plantilla de Origen (Solo plantillas con SSH activado)</label>
+                <select id="plantilla_origen" name="plantilla_origen" required>
+                    {{range .Templates}}
+                    {{if .LlaveGenerada}}
+                    <option value="{{.Nombre}}">{{.Nombre}} ({{.PlantillaBase}})</option>
+                    {{end}}
+                    {{end}}
+                </select>
+            </div>
+
+            <button type="submit" class="btn btn-primary" {{if not .LlavesActivas}}disabled{{end}}>Crear Disco Compartido</button>
+
+            {{if not .LlavesActivas}}
+            <small style="color: var(--danger); display: block; margin-top: 0.5rem;">🔒 Debes crear y activar las llaves SSH en al menos una plantilla para desbloquear esta función.</small>
+            {{end}}
+        </form>
+
+        <div class="table-responsive">
+            <table>
+                <thead>
+                <tr>
+                    <th>Nombre Disco</th>
+                    <th>Plantilla Origen</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                </tr>
+                </thead>
+                <tbody>
+                {{range .Discos}}
+                <tr>
+                    <td><strong>{{.Nombre}}</strong></td>
+                    <td>{{.PlantillaOrigen}}</td>
+                    <td>
+                        {{if eq .Estado "Conectado"}}
+                        <span style="color: var(--accent); font-weight: bold;">{{.Estado}}</span>
+                        {{else}}
+                        <span style="color: var(--text-muted);">{{.Estado}}</span>
+                        {{end}}
+                    </td>
+
+                    <td class="actions-cell">
+
+                        <form method="POST" style="display:inline-flex; gap: 0.5rem; align-items: center; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 6px;">
+                            <input type="hidden" name="disco" value="{{.Nombre}}">
+
+                            <select name="target_vm" required style="padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                                <option value="" disabled selected>Elegir MV de usuario...</option>
+                                {{range $.UserVMs}}
+                                <option value="{{.Nombre}}">{{.Nombre}}</option>
+                                {{end}}
+                            </select>
+
+                            <button type="submit" formaction="/connect-disk" class="btn btn-secondary">Conectar</button>
+                            <button type="submit" formaction="/disconnect-disk" class="btn btn-secondary">Desconectar</button>
+                        </form>
+
+                        <form action="/create-user-vm" method="POST" style="display:inline-flex; gap: 0.5rem; align-items: center; margin-left: 1rem;">
+                            <input type="hidden" name="disco" value="{{.Nombre}}">
+                            <input type="hidden" name="plantilla" value="{{.PlantillaOrigen}}">
+                            <input type="text" name="nombre_mv" required placeholder="Nombre MV..." style="width: 120px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                            <input type="text" name="descripcion" required placeholder="Descripción..." style="width: 130px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                            <button type="submit" class="btn btn-accent" style="padding: 0.45rem 0.8rem;">Crear MV de Usuario</button>
+                        </form>
+
+                        <form action="/delete-disk" method="POST" style="display:inline;">
+                            <input type="hidden" name="disco" value="{{.Nombre}}">
+                            <button type="submit" class="btn btn-danger">Eliminar Disco</button>
+                        </form>
+                    </td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="4" style="text-align: center; color: var(--text-muted);">No has creado ningún disco compartido aún.</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section>
+        <h2>Dashboard de Máquinas de Usuario</h2>
+        <div class="table-responsive">
+            <table>
+                <thead>
+                <tr>
+                    <th>Nombre MV</th>
+                    <th>Descripción</th>
+                    <th>Disco Asignado</th>
+                    <th>Estado Llaves</th>
+                    <th>Acciones</th>
+                </tr>
+                </thead>
+                <tbody>
+                {{range .UserVMs}}
+                <tr>
+                    <td><strong>{{.Nombre}}</strong></td>
+                    <td>{{.Descripcion}}</td>
+                    <td>{{.DiscoAsignado}}</td>
+                    <td>
+                        {{if .LlaveGenerada}}
+                        <span style="color: var(--accent);">Lista ({{.NombreLlave}})</span>
+                        {{else}}
+                        <em style="color: #94a3b8">Pendiente</em>
+                        {{end}}
+                    </td>
+                    <td class="actions-cell">
+                        <form action="/create-user-key" method="POST" style="display:inline;">
+                            <input type="hidden" name="nombre" value="{{.Nombre}}">
+                            <button type="submit" class="btn btn-secondary" {{if .LlaveGenerada}}disabled{{end}}>Crear Usuario y Llaves</button>
+                        </form>
+
+                        {{if .LlaveGenerada}}
+                        <a href="/download-key?nombre={{.NombreLlave}}" class="btn btn-accent">Descargar Llaves</a>
+                        {{else}}
+                        <button class="btn" disabled>Descargar Llaves</button>
+                        {{end}}
+
+                        <form action="/delete-user-vm" method="POST" style="display:inline;">
+                            <input type="hidden" name="nombre" value="{{.Nombre}}">
+                            <button type="submit" class="btn btn-danger" onclick="return confirm('¿Seguro que deseas eliminar esta máquina de usuario?');">Eliminar MV</button>
+                        </form>
+                    </td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="5" style="text-align: center; color: var(--text-muted);">No hay máquinas de usuario creadas aún. Usa la tabla de discos para crear una.</td>
+                </tr>
+                {{end}}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+</div>
+
+<script>
+    function seleccionarBase(valor, elementoBoton) {
+        document.getElementById('base').value = valor;
+        document.getElementById('error-base').style.display = 'none';
+
+        const botones = document.querySelectorAll('.btn-template');
+        botones.forEach(boton => {
+            boton.classList.remove('selected');
+        });
+
+        elementoBoton.classList.add('selected');
+    }
+
+    document.getElementById('form-plantilla').addEventListener('submit', function(evento) {
+        const inputBase = document.getElementById('base').value;
+        if (inputBase === "") {
+            evento.preventDefault();
+            document.getElementById('error-base').style.display = 'block';
+        }
+    });
+</script>
+</body>
+</html>
