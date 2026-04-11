@@ -100,6 +100,14 @@ func getDiskPath(nombreDisco string) string {
 	return filepath.Join(path, nombreDisco+".vdi")
 }
 
+func cleanupDiskTargetPath(path string) {
+	// Evita fallos por VERR_ALREADY_EXISTS cuando hay restos de intentos anteriores.
+	runVBoxManage("closemedium", "disk", path, "--delete")
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
 func hasConfiguredKeys() bool {
 	if LlavesSshActivas {
 		return true
@@ -611,10 +619,15 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 		// Si la plantilla tiene snapshots, el disco puede ser diferencial.
 		// En ese caso clonamos a un VDI normal para poder usar tipo shareable.
 		ruta = getDiskPath(nombreDisco)
+		cleanupDiskTargetPath(ruta)
 		if out, err := runVBoxManageWithTimeout(vboxCreateDiskTimeout, "clonemedium", "disk", srcPath, ruta, "--format", "VDI", "--variant", "Standard"); err != nil {
 			detail := strings.TrimSpace(string(out))
 			if strings.Contains(detail, "VERR_DISK_FULL") {
 				renderIndexWithErrorLocked(w, "No hay espacio suficiente en disco para clonar la plantilla. Libera espacio o mueve la carpeta de VirtualBox a una unidad con más capacidad.")
+				return
+			}
+			if strings.Contains(detail, "VERR_ALREADY_EXISTS") {
+				renderIndexWithErrorLocked(w, "El archivo destino del disco ya existe y no pudo reemplazarse automáticamente. Elimina el archivo VDI previo e intenta de nuevo.")
 				return
 			}
 			if detail == "" {
@@ -640,12 +653,16 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 			detail := strings.TrimSpace(string(out))
 			if strings.Contains(strings.ToLower(detail), "dynamic medium storage unit") {
 				// Shareable exige disco fijo en VirtualBox. Reintentamos en formato Fixed.
-				runVBoxManage("closemedium", "disk", ruta, "--delete")
+				cleanupDiskTargetPath(ruta)
 
 				if outFixed, errFixed := runVBoxManageWithTimeout(vboxCreateDiskTimeout, "clonemedium", "disk", srcPath, ruta, "--format", "VDI", "--variant", "Fixed"); errFixed != nil {
 					detailFixed := strings.TrimSpace(string(outFixed))
 					if strings.Contains(detailFixed, "VERR_DISK_FULL") {
 						renderIndexWithErrorLocked(w, "No hay espacio suficiente para crear un disco shareable desde plantilla. Para multiconexión real VirtualBox requiere disco fijo; libera espacio e intenta de nuevo.")
+						return
+					}
+					if strings.Contains(detailFixed, "VERR_ALREADY_EXISTS") {
+						renderIndexWithErrorLocked(w, "El archivo destino del disco ya existe y no pudo reemplazarse automáticamente. Elimina el archivo VDI previo e intenta de nuevo.")
 						return
 					}
 					if detailFixed == "" {
