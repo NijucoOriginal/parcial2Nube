@@ -1,0 +1,70 @@
+1. Crear disco multiconexión
+bashVBoxManage createmedium disk \
+  --filename "/ruta/al/disco/nombre_disco.vdi" \
+  --size 10240 \
+  --format VDI \
+  --variant Fixed
+Luego, convertirlo a tipo shareable (multiconexión):
+bashVBoxManage modifymedium disk "/ruta/al/disco/nombre_disco.vdi" \
+  --type shareable
+
+--type shareable es el tipo que permite multiconexión entre varias VMs simultáneamente.
+
+
+2. Crear máquina virtual de usuario
+bashVBoxManage createvm \
+  --name "NombreVM" \
+  --ostype "Ubuntu_64" \
+  --register
+Configurar recursos básicos:
+bashVBoxManage modifyvm "NombreVM" \
+  --memory 2048 \
+  --cpus 2 \
+  --nic1 nat
+
+# Agregar controlador de almacenamiento (SATA)
+VBoxManage storagectl "NombreVM" \
+  --name "SATA Controller" \
+  --add sata \
+  --controller IntelAhci
+
+3. Conectar disco a una VM
+bashVBoxManage storageattach "NombreVM" \
+  --storagectl "SATA Controller" \
+  --port 1 \
+  --device 0 \
+  --type hdd \
+  --medium "/ruta/al/disco/nombre_disco.vdi" \
+  --mtype shareable
+
+--mtype shareable indica que el disco se monta en modo multiconexión.
+
+
+4. Desconectar disco de una VM
+bashVBoxManage storageattach "NombreVM" \
+  --storagectl "SATA Controller" \
+  --port 1 \
+  --device 0 \
+  --medium none
+
+5. Eliminar disco
+Primero asegurarse de que esté desconectado de todas las VMs, luego:
+bash# Eliminar el registro del medio en VirtualBox
+VBoxManage closemedium disk "/ruta/al/disco/nombre_disco.vdi" \
+  --delete
+
+--delete elimina también el archivo físico del disco.
+
+
+6. Consultar estado del disco (para reflejar en el dashboard)
+bash# Ver información detallada del disco
+VBoxManage showmediuminfo disk "/ruta/al/disco/nombre_disco.vdi"
+
+# Listar todos los discos registrados
+VBoxManage list hdds
+
+# Ver VMs conectadas a un disco específico (campo "In use by VMs")
+VBoxManage showmediuminfo disk "/ruta/al/disco/nombre_disco.vdi" | grep "In use"
+
+Resumen de flujo
+AcciónComando principalCrear discocreatemedium + modifymedium --type shareableCrear VMcreatevm + storagectlConectar discostorageattach --mtype shareableDesconectar discostorageattach --medium noneEliminar discoclosemedium --deleteVer estado (dashboard)showmediuminfo / list hdds
