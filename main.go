@@ -637,8 +637,34 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if out, err := runVBoxManage("modifymedium", "disk", ruta, "--type", "shareable"); err != nil {
-			renderIndexWithErrorLocked(w, "Error al preparar el disco clonado de plantilla como multiconexión: "+strings.TrimSpace(string(out)))
-			return
+			detail := strings.TrimSpace(string(out))
+			if strings.Contains(strings.ToLower(detail), "dynamic medium storage unit") {
+				// Shareable exige disco fijo en VirtualBox. Reintentamos en formato Fixed.
+				runVBoxManage("closemedium", "disk", ruta, "--delete")
+
+				if outFixed, errFixed := runVBoxManageWithTimeout(vboxCreateDiskTimeout, "clonemedium", "disk", srcPath, ruta, "--format", "VDI", "--variant", "Fixed"); errFixed != nil {
+					detailFixed := strings.TrimSpace(string(outFixed))
+					if strings.Contains(detailFixed, "VERR_DISK_FULL") {
+						renderIndexWithErrorLocked(w, "No hay espacio suficiente para crear un disco shareable desde plantilla. Para multiconexión real VirtualBox requiere disco fijo; libera espacio e intenta de nuevo.")
+						return
+					}
+					if detailFixed == "" {
+						detailFixed = errFixed.Error()
+					} else {
+						detailFixed = detailFixed + " | " + errFixed.Error()
+					}
+					renderIndexWithErrorLocked(w, "Error al recrear el disco de plantilla en formato fijo: "+detailFixed)
+					return
+				}
+
+				if outShare, errShare := runVBoxManage("modifymedium", "disk", ruta, "--type", "shareable"); errShare != nil {
+					renderIndexWithErrorLocked(w, "Error al preparar el disco fijo de plantilla como multiconexión: "+strings.TrimSpace(string(outShare)))
+					return
+				}
+			} else {
+				renderIndexWithErrorLocked(w, "Error al preparar el disco clonado de plantilla como multiconexión: "+detail)
+				return
+			}
 		}
 
 		tieneSO = true
