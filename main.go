@@ -65,7 +65,7 @@ var (
 )
 
 const vboxCommandTimeout = 12 * time.Second
-const vboxCreateDiskTimeout = 5 * time.Minute
+const vboxCreateDiskTimeout = 10 * time.Minute
 const sshBootTimeout = 2 * time.Minute
 const diskSizeNewMB = 5120
 const diskSizeMinCloneMB = 10240
@@ -76,6 +76,7 @@ type PageData struct {
 	UserVMs       []UserVM // Pasamos los usuarios al HTML
 	LlavesActivas bool
 	Error         string
+	Info          string
 }
 
 func init() {
@@ -257,29 +258,118 @@ func refreshAllDisksStatusLocked() {
 }
 
 func runVBoxManage(args ...string) ([]byte, error) {
+	log.Printf("[CMD][VBoxManage] Ejecutando: VBoxManage %s", strings.Join(args, " "))
 	ctx, cancel := context.WithTimeout(context.Background(), vboxCommandTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "VBoxManage", args...)
 	out, err := cmd.CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		log.Printf("[CMD][VBoxManage] Salida: %s", strings.TrimSpace(string(out)))
+	}
 	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("[CMD][VBoxManage] Timeout: VBoxManage %s", strings.Join(args, " "))
 		return out, fmt.Errorf("timeout ejecutando VBoxManage: %s", strings.Join(args, " "))
+	}
+	if err != nil {
+		log.Printf("[CMD][VBoxManage] Error: %v", err)
+	} else {
+		log.Printf("[CMD][VBoxManage] OK")
 	}
 
 	return out, err
 }
 
 func runVBoxManageWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
+	log.Printf("[CMD][VBoxManage] Ejecutando (timeout=%s): VBoxManage %s", timeout, strings.Join(args, " "))
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "VBoxManage", args...)
 	out, err := cmd.CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		log.Printf("[CMD][VBoxManage] Salida: %s", strings.TrimSpace(string(out)))
+	}
 	if ctx.Err() == context.DeadlineExceeded {
+		log.Printf("[CMD][VBoxManage] Timeout: VBoxManage %s", strings.Join(args, " "))
 		return out, fmt.Errorf("timeout ejecutando VBoxManage: %s", strings.Join(args, " "))
+	}
+	if err != nil {
+		log.Printf("[CMD][VBoxManage] Error: %v", err)
+	} else {
+		log.Printf("[CMD][VBoxManage] OK")
 	}
 
 	return out, err
+}
+
+func isVMPoweredOff(vmName string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "VBoxManage", "showvminfo", vmName, "--machinereadable")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), `vmstate="poweroff"`)
+}
+
+func shutdownVMGracefully(vmName string) {
+	logFlow("VM-SHUTDOWN", "Intentando apagado graceful de vm=%s", vmName)
+	if _, err := runVBoxManage("controlvm", vmName, "acpipowerbutton"); err == nil {
+		deadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(deadline) {
+			if isVMPoweredOff(vmName) {
+				logFlow("VM-SHUTDOWN", "VM apagada por ACPI vm=%s", vmName)
+				return
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	logFlow("VM-SHUTDOWN", "Fallback a poweroff forzado vm=%s", vmName)
+	runVBoxManage("controlvm", vmName, "poweroff")
+}
+
+func runSSHCommandLogged(session *ssh.Session, command string) error {
+	log.Printf("[CMD][SSH] Ejecutando: %s", command)
+	err := session.Run(command)
+	if err != nil {
+		log.Printf("[CMD][SSH] Error: %v", err)
+	} else {
+		log.Printf("[CMD][SSH] OK")
+	}
+	return err
+}
+
+func runSSHCommandWithOutputLogged(session *ssh.Session, command string) ([]byte, error) {
+	log.Printf("[CMD][SSH] Ejecutando (output): %s", command)
+	out, err := session.CombinedOutput(command)
+	if strings.TrimSpace(string(out)) != "" {
+		log.Printf("[CMD][SSH] Salida: %s", strings.TrimSpace(string(out)))
+	}
+	if err != nil {
+		log.Printf("[CMD][SSH] Error: %v", err)
+	} else {
+		log.Printf("[CMD][SSH] OK")
+	}
+	return out, err
+}
+
+func logFlow(flow string, format string, args ...interface{}) {
+	if len(args) == 0 {
+		log.Printf("[FLUJO][%s] %s", flow, format)
+		return
+	}
+	log.Printf("[FLUJO][%s] %s", flow, fmt.Sprintf(format, args...))
+}
+
+func shellSingleQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func getFreeLocalPort() (string, error) {
@@ -310,8 +400,10 @@ func openSSHClientWithPasswords(host string, user string, passwords []string) (*
 
 		client, err := ssh.Dial("tcp", host, sshConfig)
 		if err == nil {
+			log.Printf("[CMD][SSH] Conexion por password exitosa -> host=%s user=%s", host, user)
 			return client, nil
 		}
+		log.Printf("[CMD][SSH] Conexion por password fallida -> host=%s user=%s err=%v", host, user, err)
 	}
 
 	return nil, fmt.Errorf("no fue posible autenticar por SSH con las credenciales disponibles")
@@ -330,6 +422,56 @@ func waitForSSHClient(host string, user string, passwords []string, timeout time
 	return nil, fmt.Errorf("la MV no quedó accesible por SSH dentro del tiempo esperado")
 }
 
+func openSSHClientWithPrivateKey(host string, user string, privateKeyPEM []byte) (*ssh.Client, error) {
+	signer, err := ssh.ParsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("no fue posible parsear la llave privada generada: %w", err)
+	}
+
+	sshConfig := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}
+
+	client, err := ssh.Dial("tcp", host, sshConfig)
+	if err != nil {
+		log.Printf("[CMD][SSH] Conexion por llave fallida -> host=%s user=%s err=%v", host, user, err)
+		return nil, err
+	}
+	log.Printf("[CMD][SSH] Conexion por llave exitosa -> host=%s user=%s", host, user)
+
+	return client, nil
+}
+
+func waitForSSHClientWithPrivateKey(host string, user string, privateKeyPEM []byte, timeout time.Duration) (*ssh.Client, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		client, err := openSSHClientWithPrivateKey(host, user, privateKeyPEM)
+		if err == nil {
+			return client, nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	return nil, fmt.Errorf("no fue posible validar acceso SSH por llave dentro del tiempo esperado")
+}
+
+func publicAuthorizedKeyFromPrivateKeyPEM(privateKeyPEM []byte) (string, error) {
+	signer, err := ssh.ParsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return "", fmt.Errorf("no fue posible parsear llave privada para derivar clave pública: %w", err)
+	}
+	pub := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	if pub == "" {
+		return "", fmt.Errorf("no fue posible derivar una clave pública válida")
+	}
+	return pub, nil
+}
+
 func renderIndexWithErrorLocked(w http.ResponseWriter, errMsg string) {
 	tmpl.Execute(w, PageData{
 		Templates:     templatesDB,
@@ -342,6 +484,10 @@ func renderIndexWithErrorLocked(w http.ResponseWriter, errMsg string) {
 
 func redirectWithError(w http.ResponseWriter, r *http.Request, errMsg string) {
 	http.Redirect(w, r, "/?error="+url.QueryEscape(errMsg), http.StatusSeeOther)
+}
+
+func redirectWithInfo(w http.ResponseWriter, r *http.Request, msg string) {
+	http.Redirect(w, r, "/?info="+url.QueryEscape(msg), http.StatusSeeOther)
 }
 
 func main() {
@@ -359,6 +505,7 @@ func main() {
 	// Rutas para las Máquinas de Usuario
 	http.HandleFunc("/create-user-vm", handleCreateUserVM)
 	http.HandleFunc("/create-user-key", handleCreateUserKey)
+	http.HandleFunc("/verify-user-access", handleVerifyUserAccess)
 	http.HandleFunc("/delete-user-vm", handleDeleteUserVM)
 
 	fmt.Println("Servidor corriendo en http://localhost:8080")
@@ -377,6 +524,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		UserVMs:       ListaUserVMs,
 		LlavesActivas: hasConfiguredKeys(),
 		Error:         strings.TrimSpace(r.URL.Query().Get("error")),
+		Info:          strings.TrimSpace(r.URL.Query().Get("info")),
 	}
 	dbMutex.Unlock()
 	tmpl.Execute(w, data)
@@ -426,6 +574,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	r.ParseForm()
 	nombrePlantilla := strings.TrimSpace(r.FormValue("nombre"))
+	logFlow("CREATE-KEY-ROOT", "Inicio solicitud para plantilla=%s", nombrePlantilla)
 	if nombrePlantilla == "" {
 		redirectWithError(w, r, "Debes indicar la máquina virtual base para generar las llaves root.")
 		return
@@ -452,23 +601,21 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 			vmPort := "2224"
 
 			fmt.Printf("Preparando red para MV: %s...\n", t.PlantillaBase)
-			exec.Command("VBoxManage", "modifyvm", t.PlantillaBase, "--natpf1", "delete", "regla_ssh").Run()
+			runVBoxManage("modifyvm", t.PlantillaBase, "--natpf1", "delete", "regla_ssh")
 
-			errPort := exec.Command("VBoxManage", "modifyvm", t.PlantillaBase, "--natpf1", "regla_ssh,tcp,127.0.0.1,2224,,22").Run()
-			if errPort != nil {
-				fmt.Printf("Advertencia al configurar puerto: %v\n", errPort)
+			if outPort, errPort := runVBoxManage("modifyvm", t.PlantillaBase, "--natpf1", "regla_ssh,tcp,127.0.0.1,2224,,22"); errPort != nil {
+				fmt.Printf("Advertencia al configurar puerto: %v\nDetalles: %s\n", errPort, string(outPort))
 			}
 
 			fmt.Printf("Encendiendo MV: %s...\n", t.PlantillaBase)
-			cmd := exec.Command("VBoxManage", "startvm", t.PlantillaBase, "--type", "headless")
-			if err := cmd.Run(); err != nil {
-				fmt.Printf("Error al encender MV: %v\n", err)
+			if outStart, err := runVBoxManage("startvm", t.PlantillaBase, "--type", "headless"); err != nil {
+				fmt.Printf("Error al encender MV: %v\nDetalles: %s\n", err, string(outStart))
 			}
 
 			fmt.Println("Esperando a que la MV inicie (60 segundos)...")
 			time.Sleep(60 * time.Second)
 
-			privateKey, _ := rsa.GenerateKey(rand.Reader, 1024)
+			privateKey, _ := rsa.GenerateKey(rand.Reader, 3072)
 			nombreLlavePrivada := fmt.Sprintf("rsa_%s.pem", t.Nombre)
 			rutaArchivo := filepath.Join(getVBoxKeysPath(), nombreLlavePrivada)
 
@@ -491,35 +638,38 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 			}
 
 			target := fmt.Sprintf("%s:%s", vmIP, vmPort)
+			log.Printf("[CMD][SSH] Dial directo -> host=%s user=root", target)
 			client, err := ssh.Dial("tcp", target, sshConfig)
 			if err != nil {
 				fmt.Printf("Fallo conexión SSH: %v.\n", err)
-				exec.Command("VBoxManage", "controlvm", t.PlantillaBase, "poweroff").Run()
+				runVBoxManage("controlvm", t.PlantillaBase, "poweroff")
 				renderIndexWithErrorLocked(w, "No fue posible conectar por SSH a la máquina virtual base para inyectar llaves root.")
 				return
 			} else {
+				log.Printf("[CMD][SSH] Dial directo exitoso -> host=%s user=root", target)
 				defer client.Close()
 				session, err := client.NewSession()
 				if err != nil {
-					exec.Command("VBoxManage", "controlvm", t.PlantillaBase, "poweroff").Run()
+					runVBoxManage("controlvm", t.PlantillaBase, "poweroff")
 					renderIndexWithErrorLocked(w, "No fue posible abrir sesión SSH en la máquina virtual base.")
 					return
 				}
 				defer session.Close()
 				comandoSSH := fmt.Sprintf(`mkdir -p /root/.ssh && echo "%s" >> /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys`, strings.TrimSpace(string(pubKeyBytes)))
 
-				if err := session.Run(comandoSSH); err != nil {
-					exec.Command("VBoxManage", "controlvm", t.PlantillaBase, "poweroff").Run()
+				if err := runSSHCommandLogged(session, comandoSSH); err != nil {
+					runVBoxManage("controlvm", t.PlantillaBase, "poweroff")
 					renderIndexWithErrorLocked(w, "No fue posible inyectar la llave root en la máquina virtual base.")
 					return
 				}
 				fmt.Println("¡Llave inyectada exitosamente en la MV!")
 				LlavesSshActivas = true
-				exec.Command("VBoxManage", "controlvm", t.PlantillaBase, "poweroff").Run()
+				runVBoxManage("controlvm", t.PlantillaBase, "poweroff")
 			}
 
 			templatesDB[i].LlaveGenerada = true
 			templatesDB[i].NombreLlave = nombreLlavePrivada
+			logFlow("CREATE-KEY-ROOT", "Llaves root generadas correctamente para plantilla=%s", nombrePlantilla)
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -566,6 +716,7 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 	nombreDisco := strings.TrimSpace(r.FormValue("nombre_disco"))
 	plantillaOrigen := strings.TrimSpace(r.FormValue("plantilla_origen"))
 	tipoDisco := strings.TrimSpace(r.FormValue("tipo_disco"))
+	logFlow("CREATE-DISK", "Inicio solicitud nombre=%s plantilla=%s tipo=%s", nombreDisco, plantillaOrigen, tipoDisco)
 	if tipoDisco == "" {
 		tipoDisco = "nuevo"
 	}
@@ -719,6 +870,7 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 		Tipo:             tipoRegistrado,
 	})
 	updateDiskStatusLocked(len(ListaDiscos) - 1)
+	logFlow("CREATE-DISK", "Disco registrado correctamente nombre=%s ruta=%s tipo=%s", nombreDisco, ruta, tipoRegistrado)
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -781,6 +933,7 @@ func handleConnectDisk(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	nombreDisco := strings.TrimSpace(r.FormValue("disco"))
 	targetVM := strings.TrimSpace(r.FormValue("target_vm")) // Ahora capturamos la MV de usuario desde el comboBox
+	logFlow("CONNECT-DISK", "Solicitud disco=%s vm=%s", nombreDisco, targetVM)
 	if nombreDisco == "" || targetVM == "" {
 		redirectWithError(w, r, "Debes seleccionar un disco y una máquina virtual de usuario para conectar.")
 		return
@@ -833,6 +986,7 @@ func handleConnectDisk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dbMutex.Unlock()
+	logFlow("CONNECT-DISK", "Conexión aplicada disco=%s vm=%s", nombreDisco, targetVM)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -887,6 +1041,7 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 
 	nombreMV := strings.TrimSpace(r.FormValue("nombre_mv"))
 	descripcion := strings.TrimSpace(r.FormValue("descripcion"))
+	logFlow("CREATE-USER-VM", "Inicio solicitud nombreMV=%s disco=%s plantilla=%s", nombreMV, nombreDisco, plantillaOrigen)
 	if nombreMV == "" || descripcion == "" {
 		redirectWithError(w, r, "Debes ingresar nombre y descripción para crear la máquina virtual de usuario.")
 		return
@@ -929,8 +1084,7 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 	guestOS := inferGuestOS(plantillaOrigen)
 
 	// 2. CREAR una máquina NUEVA desde cero (NO clonar)
-	cmdCreate := exec.Command("VBoxManage", "createvm", "--name", nombreMV, "--ostype", guestOS, "--basefolder", grupoUsuariosPath, "--groups", "/GrupoUsuarios", "--register")
-	outCreate, errCreate := cmdCreate.CombinedOutput()
+	outCreate, errCreate := runVBoxManage("createvm", "--name", nombreMV, "--ostype", guestOS, "--basefolder", grupoUsuariosPath, "--groups", "/GrupoUsuarios", "--register")
 
 	if errCreate != nil {
 		fmt.Printf("ERROR AL CREAR MV NUEVA: %v\nDetalles: %s\n", errCreate, string(outCreate))
@@ -939,25 +1093,22 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Println("MV Nueva creada y registrada exitosamente.")
 
-	cmdResources := exec.Command("VBoxManage", "modifyvm", nombreMV, "--memory", "2048", "--cpus", "2", "--nic1", "nat")
-	if outResources, errResources := cmdResources.CombinedOutput(); errResources != nil {
+	if outResources, errResources := runVBoxManage("modifyvm", nombreMV, "--memory", "2048", "--cpus", "2", "--nic1", "nat"); errResources != nil {
 		fmt.Printf("Advertencia al configurar recursos de la MV: %v\nDetalles: %s\n", errResources, string(outResources))
 	}
 
 	// 3. Crear un controlador SATA (Las máquinas nuevas vienen "peladas", necesitan esto para conectar el disco)
-	cmdCtl := exec.Command("VBoxManage", "storagectl", nombreMV, "--name", "SATA Controller", "--add", "sata", "--controller", "IntelAhci")
-	outCtl, errCtl := cmdCtl.CombinedOutput()
+	outCtl, errCtl := runVBoxManage("storagectl", nombreMV, "--name", "SATA Controller", "--add", "sata", "--controller", "IntelAhci")
 	if errCtl != nil {
 		fmt.Printf("Advertencia al crear controlador SATA: %v\nDetalles: %s\n", errCtl, string(outCtl))
 	}
 
 	// 4. Adjuntar el disco multiconexión al controlador recién creado
-	cmdStorage := exec.Command("VBoxManage", "storageattach", nombreMV, "--storagectl", "SATA Controller", "--port", "1", "--device", "0", "--type", "hdd", "--medium", discoPath, "--mtype", "shareable")
-	outStorage, errStorage := cmdStorage.CombinedOutput()
+	outStorage, errStorage := runVBoxManage("storageattach", nombreMV, "--storagectl", "SATA Controller", "--port", "1", "--device", "0", "--type", "hdd", "--medium", discoPath, "--mtype", "shareable")
 
 	if errStorage != nil {
 		fmt.Printf("Error al adjuntar el disco: %v\nDetalles: %s\n", errStorage, string(outStorage))
-		exec.Command("VBoxManage", "unregistervm", nombreMV, "--delete").Run()
+		runVBoxManage("unregistervm", nombreMV, "--delete")
 		redirectWithError(w, r, "No fue posible asociar el disco multiconexión a la nueva máquina virtual.")
 		return
 	}
@@ -981,6 +1132,7 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 	dbMutex.Unlock()
 
 	fmt.Println("Proceso terminado. Actualizando interfaz...")
+	logFlow("CREATE-USER-VM", "MV de usuario creada nombreMV=%s disco=%s", nombreMV, nombreDisco)
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -993,6 +1145,7 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 
 	r.ParseForm()
 	nombreMV := strings.TrimSpace(r.FormValue("nombre"))
+	logFlow("CREATE-USER-KEY", "Inicio solicitud para vm=%s", nombreMV)
 	if nombreMV == "" {
 		redirectWithError(w, r, "Nombre de máquina virtual de usuario no válido.")
 		return
@@ -1056,7 +1209,7 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Encendiendo MV de Usuario: %s...\n", mv.Nombre)
 	runVBoxManage("startvm", mv.Nombre, "--type", "headless")
 
-	privateKey, _ := rsa.GenerateKey(rand.Reader, 1024)
+	privateKey, _ := rsa.GenerateKey(rand.Reader, 3072)
 	nombreLlavePrivada := fmt.Sprintf("rsa_user_%s.pem", mv.Nombre)
 	rutaArchivo := filepath.Join(getVBoxKeysPath(), nombreLlavePrivada)
 
@@ -1084,16 +1237,58 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 	}
 	defer session.Close()
 
-	comandoSSH := fmt.Sprintf(`id -u usuario_mv >/dev/null 2>&1 || useradd -m -s /bin/bash usuario_mv; mkdir -p /home/usuario_mv/.ssh && echo "%s" > /home/usuario_mv/.ssh/authorized_keys && chown -R usuario_mv:usuario_mv /home/usuario_mv/.ssh && chmod 700 /home/usuario_mv/.ssh && chmod 600 /home/usuario_mv/.ssh/authorized_keys`, strings.TrimSpace(string(pubKeyBytes)))
+	pubKeyValue := strings.TrimSpace(string(pubKeyBytes))
+	if pubKeyValue == "" {
+		runVBoxManage("controlvm", mv.Nombre, "poweroff")
+		renderIndexWithErrorLocked(w, "No fue posible derivar la llave pública del usuario para inyectarla en la MV.")
+		return
+	}
+	comandoSSH := fmt.Sprintf(`set -e; id -u usuario_mv >/dev/null 2>&1 || useradd -m -s /bin/bash usuario_mv; usermod -s /bin/bash usuario_mv >/dev/null 2>&1 || true; usermod -U usuario_mv >/dev/null 2>&1 || true; chage -E -1 usuario_mv >/dev/null 2>&1 || true; user_home="$(getent passwd usuario_mv 2>/dev/null | cut -d: -f6)"; [ -n "$user_home" ] || user_home="$(eval echo ~usuario_mv 2>/dev/null)"; [ -n "$user_home" ] || user_home="/home/usuario_mv"; user_group="$(id -gn usuario_mv 2>/dev/null || echo usuario_mv)"; mkdir -p "$user_home" "$user_home/.ssh"; chown -R usuario_mv:"$user_group" "$user_home"; chmod 755 "$user_home"; chmod 700 "$user_home/.ssh"; printf '%%s\n' %s > "$user_home/.ssh/authorized_keys"; chown usuario_mv:"$user_group" "$user_home/.ssh/authorized_keys"; chmod 600 "$user_home/.ssh/authorized_keys"; test -s "$user_home/.ssh/authorized_keys"; grep -qxF %s "$user_home/.ssh/authorized_keys"; echo KEY_INJECT_OK`, shellSingleQuote(pubKeyValue), shellSingleQuote(pubKeyValue))
 
-	if err := session.Run(comandoSSH); err != nil {
+	provisionOut, provisionErr := runSSHCommandWithOutputLogged(session, comandoSSH)
+	if provisionErr != nil || !strings.Contains(string(provisionOut), "KEY_INJECT_OK") {
 		runVBoxManage("controlvm", mv.Nombre, "poweroff")
 		renderIndexWithErrorLocked(w, "No fue posible crear el usuario Linux con llaves en la MV.")
 		return
 	}
+
+	diagCmd := `user_home="$(getent passwd usuario_mv | cut -d: -f6)"; [ -n "$user_home" ] || user_home="/home/usuario_mv"; echo DIAG_USER_HOME=$user_home; getent passwd usuario_mv || true; ls -ld "$user_home" "$user_home/.ssh" "$user_home/.ssh/authorized_keys" 2>/dev/null || true; stat -c 'DIAG_PERM %U:%G %a %n' "$user_home" "$user_home/.ssh" "$user_home/.ssh/authorized_keys" 2>/dev/null || true; grep -Ei '^(PubkeyAuthentication|AuthorizedKeysFile|AllowUsers|DenyUsers|PasswordAuthentication|PermitRootLogin)' /etc/ssh/sshd_config 2>/dev/null || true`
+	diagSession, diagSessionErr := client.NewSession()
+	if diagSessionErr == nil {
+		_, _ = runSSHCommandWithOutputLogged(diagSession, diagCmd)
+		diagSession.Close()
+	}
 	fmt.Println("¡Usuario creado y llave inyectada!")
 
-	runVBoxManage("controlvm", mv.Nombre, "poweroff")
+	// Verificacion final: autenticar con el usuario creado y la llave privada recien generada.
+	verifyClient, verifyErr := waitForSSHClientWithPrivateKey(host, "usuario_mv", llavePEM, 45*time.Second)
+	if verifyErr != nil {
+		logFlow("CREATE-USER-KEY", "Fallo validación por llave para vm=%s: %v", nombreMV, verifyErr)
+		runVBoxManage("controlvm", mv.Nombre, "poweroff")
+		renderIndexWithErrorLocked(w, "Se creó el usuario pero no se pudo validar el acceso SSH con llave. Verifica que PubkeyAuthentication esté habilitado en la MV y reintenta.")
+		return
+	}
+	verifySession, verifySessionErr := verifyClient.NewSession()
+	if verifySessionErr != nil {
+		verifyClient.Close()
+		runVBoxManage("controlvm", mv.Nombre, "poweroff")
+		renderIndexWithErrorLocked(w, "No fue posible abrir sesión de verificación SSH con el usuario creado.")
+		return
+	}
+	verificationCmd := "whoami && mkdir -p /home/usuario_mv/verificacion_ssh && date > /home/usuario_mv/verificacion_ssh/ultima_validacion.txt && test -s /home/usuario_mv/verificacion_ssh/ultima_validacion.txt && echo INTERACCION_OK"
+	verifyOut, runErr := runSSHCommandWithOutputLogged(verifySession, verificationCmd)
+	verifyText := strings.TrimSpace(string(verifyOut))
+	if runErr != nil || !strings.Contains(verifyText, "INTERACCION_OK") || !strings.Contains(verifyText, "usuario_mv") {
+		verifySession.Close()
+		verifyClient.Close()
+		runVBoxManage("controlvm", mv.Nombre, "poweroff")
+		renderIndexWithErrorLocked(w, "La autenticación por llave funcionó, pero la interacción de prueba del usuario en la MV falló. Verifica permisos del usuario y shell.")
+		return
+	}
+	verifySession.Close()
+	verifyClient.Close()
+
+	shutdownVMGracefully(mv.Nombre)
 
 	dbMutex.Lock()
 	if idx >= 0 && idx < len(ListaUserVMs) && ListaUserVMs[idx].Nombre == nombreMV {
@@ -1101,6 +1296,7 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 		ListaUserVMs[idx].NombreLlave = nombreLlavePrivada
 	}
 	dbMutex.Unlock()
+	logFlow("CREATE-USER-KEY", "Usuario y llaves creados/verificados para vm=%s llave=%s", nombreMV, nombreLlavePrivada)
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1134,7 +1330,7 @@ func handleDeleteUserVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Requisito del Parcial: "Eliminar MV"
-	exec.Command("VBoxManage", "unregistervm", nombreMV, "--delete").Run()
+	runVBoxManage("unregistervm", nombreMV, "--delete")
 
 	dbMutex.Lock()
 	var nuevaLista []UserVM
@@ -1147,4 +1343,120 @@ func handleDeleteUserVM(w http.ResponseWriter, r *http.Request) {
 	dbMutex.Unlock()
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func handleVerifyUserAccess(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	r.ParseForm()
+	nombreMV := strings.TrimSpace(r.FormValue("nombre"))
+	logFlow("VERIFY-USER-ACCESS", "Inicio verificación manual vm=%s", nombreMV)
+	if nombreMV == "" {
+		redirectWithError(w, r, "Nombre de máquina virtual de usuario no válido para verificación.")
+		return
+	}
+
+	dbMutex.Lock()
+	idx := -1
+	for i := range ListaUserVMs {
+		if ListaUserVMs[i].Nombre == nombreMV {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "La máquina virtual de usuario indicada no existe.")
+		return
+	}
+	vm := ListaUserVMs[idx]
+	dbMutex.Unlock()
+
+	if !vm.LlaveGenerada || strings.TrimSpace(vm.NombreLlave) == "" {
+		redirectWithError(w, r, "La MV seleccionada no tiene llave de usuario generada. Primero crea usuario y llaves.")
+		return
+	}
+
+	rutaLlave := filepath.Join(getVBoxKeysPath(), vm.NombreLlave)
+	llavePEM, readErr := os.ReadFile(rutaLlave)
+	if readErr != nil {
+		redirectWithError(w, r, "No fue posible leer la llave privada del usuario para verificar acceso SSH.")
+		return
+	}
+
+	vmPort, portErr := getFreeLocalPort()
+	if portErr != nil {
+		redirectWithError(w, r, "No fue posible reservar un puerto local para verificación SSH.")
+		return
+	}
+
+	runVBoxManage("modifyvm", vm.Nombre, "--natpf1", "delete", "regla_ssh_user")
+	runVBoxManage("modifyvm", vm.Nombre, "--natpf1", "delete", "regla_ssh_user_verify")
+	if out, err := runVBoxManage("modifyvm", vm.Nombre, "--natpf1", fmt.Sprintf("regla_ssh_user_verify,tcp,127.0.0.1,%s,,22", vmPort)); err != nil {
+		redirectWithError(w, r, "No fue posible configurar reenvío SSH para la verificación: "+strings.TrimSpace(string(out)))
+		return
+	}
+
+	if out, err := runVBoxManage("startvm", vm.Nombre, "--type", "headless"); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(string(out)))
+		if !strings.Contains(msg, "already") && !strings.Contains(msg, "running") {
+			redirectWithError(w, r, "No fue posible iniciar la MV para verificar acceso SSH: "+strings.TrimSpace(string(out)))
+			return
+		}
+	}
+
+	host := fmt.Sprintf("127.0.0.1:%s", vmPort)
+	verifyClient, verifyErr := waitForSSHClientWithPrivateKey(host, "usuario_mv", llavePEM, sshBootTimeout)
+	if verifyErr != nil {
+		logFlow("VERIFY-USER-ACCESS", "Fallo autenticación por llave vm=%s: %v", nombreMV, verifyErr)
+
+		rootClient, rootErr := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 30*time.Second)
+		if rootErr == nil {
+			rootSession, rootSessionErr := rootClient.NewSession()
+			if rootSessionErr == nil {
+				diagCmd := `user_home="$(getent passwd usuario_mv | cut -d: -f6)"; [ -n "$user_home" ] || user_home="/home/usuario_mv"; echo DIAG_USER_HOME=$user_home; getent passwd usuario_mv || true; ls -ld "$user_home" "$user_home/.ssh" "$user_home/.ssh/authorized_keys" 2>/dev/null || true; stat -c 'DIAG_PERM %U:%G %a %n' "$user_home" "$user_home/.ssh" "$user_home/.ssh/authorized_keys" 2>/dev/null || true; grep -Ei '^(PubkeyAuthentication|AuthorizedKeysFile|AllowUsers|DenyUsers|PasswordAuthentication|PermitRootLogin)' /etc/ssh/sshd_config 2>/dev/null || true`
+				_, _ = runSSHCommandWithOutputLogged(rootSession, diagCmd)
+				rootSession.Close()
+			}
+			rootClient.Close()
+		}
+
+		shutdownVMGracefully(vm.Nombre)
+		redirectWithError(w, r, "La verificación SSH falló: no fue posible autenticarse con el usuario y llave generados. Recomendación: vuelve a ejecutar 'Crear Usuario y Llaves' para regenerar y reinyectar una llave consistente.")
+		return
+	}
+
+	verifySession, verifySessionErr := verifyClient.NewSession()
+	if verifySessionErr != nil {
+		verifyClient.Close()
+		shutdownVMGracefully(vm.Nombre)
+		redirectWithError(w, r, "La verificación SSH falló: no fue posible abrir sesión del usuario.")
+		return
+	}
+
+	verificationCmd := "whoami && echo HOME_PATH=$HOME && mkdir -p \"$HOME\"/verificacion_manual && date > \"$HOME\"/verificacion_manual/ultima_prueba.txt && test -s \"$HOME\"/verificacion_manual/ultima_prueba.txt && echo INTERACCION_MANUAL_OK"
+	verifyOut, runErr := runSSHCommandWithOutputLogged(verifySession, verificationCmd)
+	verifyText := strings.TrimSpace(string(verifyOut))
+	homePath := ""
+	for _, line := range strings.Split(verifyText, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "HOME_PATH=") {
+			homePath = strings.TrimSpace(strings.TrimPrefix(l, "HOME_PATH="))
+			break
+		}
+	}
+	verifySession.Close()
+	verifyClient.Close()
+	shutdownVMGracefully(vm.Nombre)
+
+	if runErr != nil || !strings.Contains(verifyText, "INTERACCION_MANUAL_OK") || !strings.Contains(verifyText, "usuario_mv") || homePath == "" {
+		redirectWithError(w, r, "La autenticación funcionó, pero la interacción manual de prueba falló dentro de la VM.")
+		return
+	}
+	logFlow("VERIFY-USER-ACCESS", "Verificación OK vm=%s home=%s", nombreMV, homePath)
+
+	redirectWithInfo(w, r, "Verificación exitosa: conexión SSH e interacción completadas. HOME del usuario: "+homePath)
 }

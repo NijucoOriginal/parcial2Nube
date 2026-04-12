@@ -197,6 +197,13 @@
         margin-bottom: 1.5rem;
         border-radius: 4px;
       }
+      .alert-success {
+        padding: 1rem;
+        background-color: rgba(16, 185, 129, 0.2);
+        border-left: 4px solid var(--accent);
+        margin-bottom: 1.5rem;
+        border-radius: 4px;
+      }
     </style>
   </head>
   <body>
@@ -205,6 +212,10 @@
 
       {{if .Error}}
       <div class="alert">{{.Error}}</div>
+      {{end}}
+
+      {{if .Info}}
+      <div class="alert-success">{{.Info}}</div>
       {{end}}
 
       <section>
@@ -658,8 +669,20 @@
                     class="btn btn-accent"
                     >Descargar Llaves</a
                   >
+
+                  <form
+                    action="/verify-user-access"
+                    method="POST"
+                    style="display: inline"
+                  >
+                    <input type="hidden" name="nombre" value="{{.Nombre}}" />
+                    <button type="submit" class="btn btn-primary">
+                      Probar acceso SSH
+                    </button>
+                  </form>
                   {{else}}
                   <button class="btn" disabled>Descargar Llaves</button>
+                  <button class="btn" disabled>Probar acceso SSH</button>
                   {{end}}
 
                   <form
@@ -698,6 +721,9 @@
         </div>
         <small style="display: block; margin-top: 0.8rem; color: var(--text-muted)">
           Nota: El botón Crear Usuario y Llaves se habilita cuando la MV tiene un disco multiconexión asociado y todavía no tiene llaves generadas.
+        </small>
+        <small style="display: block; margin-top: 0.4rem; color: var(--text-muted)">
+          Nota: El botón Probar acceso SSH valida en tiempo real que el usuario de la MV pueda autenticarse con su llave y ejecutar una interacción dentro del sistema.
         </small>
       </section>
     </div>
