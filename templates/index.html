@@ -266,7 +266,7 @@
               <button
                 class="btn-template"
                 type="button"
-                onclick="seleccionarBase('Debi', this)"
+                onclick="seleccionarBase('Debian13Clon', this)"
               >
                 <span class="icon-deb">D13</span> Debian 13
               </button>
@@ -727,6 +727,109 @@
         </small>
       </section>
     </div>
+
+    <section>
+      <h2>Despliegue de Aplicación (systemd)</h2>
+      <form action="/deploy" method="POST" enctype="multipart/form-data" style="background-color: var(--bg-dark); padding: 1.5rem; border-radius: 8px;">
+
+        <div class="form-group">
+          <label for="target_vm_deploy">Máquina Virtual Destino</label>
+          <select id="target_vm_deploy" name="target_vm" required>
+            <option value="" disabled selected>Elegir MV...</option>
+            {{range .UserVMs}}
+            <option value="{{.Nombre}}">{{.Nombre}}</option>
+            {{end}}
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="app_zip">Archivo de la aplicación (.zip)</label>
+          <input type="file" id="app_zip" name="app_zip" accept=".zip" required style="color: white; padding: 0.5rem;" />
+        </div>
+
+        <div class="form-group">
+          <label for="ruta_destino">Ruta Destino (Ej: /opt/mi_app)</label>
+          <input type="text" id="ruta_destino" name="ruta_destino" required placeholder="/opt/mi_app" />
+        </div>
+
+        <div class="form-group">
+          <label for="nombre_servicio">Nombre del Servicio (Ej: mi_app.service)</label>
+          <input type="text" id="nombre_servicio" name="nombre_servicio" required placeholder="mi_app.service" />
+        </div>
+
+        <div class="form-group">
+          <label for="parametros">Parámetros de ejecución (Opcional - Ej: logs.txt 2)</label>
+          <input type="text" id="parametros" name="parametros" placeholder="Ej: logs.txt 2" />
+        </div>
+
+        <button type="submit" class="btn btn-accent">Desplegar y Crear Servicio</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Control de Servicios y Logs en Vivo</h2>
+
+      <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 300px;">
+          <form id="service-controls" action="/service-action" method="POST" style="display: flex; flex-direction: column; gap: 1rem;">
+            <select name="target_vm" id="log_target_vm" required>
+              <option value="" disabled selected>Selecciona MV...</option>
+              {{range .UserVMs}}
+              <option value="{{.Nombre}}">{{.Nombre}}</option>
+              {{end}}
+            </select>
+
+            <input type="text" name="nombre_servicio" id="log_nombre_servicio" required placeholder="Nombre del servicio (Ej: mi_app.service)" />
+            <input type="text" name="archivo_log" id="log_archivo" required placeholder="Ruta del log (Ej: /opt/mi_app/logs.txt)" />
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+              <button type="submit" name="accion" value="start" class="btn btn-accent">Iniciar</button>
+              <button type="submit" name="accion" value="stop" class="btn btn-danger">Detener</button>
+              <button type="submit" name="accion" value="restart" class="btn btn-primary">Reiniciar</button>
+              <button type="submit" name="accion" value="status" class="btn btn-secondary">Ver Status</button>
+              <button type="submit" name="accion" value="enable" class="btn btn-secondary">Habilitar (Arranque)</button>
+              <button type="submit" name="accion" value="disable" class="btn btn-secondary">Deshabilitar</button>
+            </div>
+          </form>
+        </div>
+
+        <div style="flex: 2; min-width: 400px; background: black; border-radius: 8px; padding: 1rem; border: 1px solid var(--border);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem;">
+            <span style="color: #10b981; font-family: monospace; font-weight: bold;">Terminal - tail -f</span>
+            <button type="button" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.7rem;" onclick="iniciarLogs()">▶ Iniciar Visor</button>
+          </div>
+          <pre id="log-viewer" style="color: #a3be8c; font-family: monospace; font-size: 0.85rem; height: 250px; overflow-y: auto; white-space: pre-wrap; margin: 0;">Esperando conexión...</pre>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      let logInterval;
+      function iniciarLogs() {
+        const vm = document.getElementById('log_target_vm').value;
+        const logFile = document.getElementById('log_archivo').value;
+
+        if (!vm || !logFile) {
+          alert("Selecciona la MV y la ruta del log para iniciar el visor.");
+          return;
+        }
+
+        document.getElementById('log-viewer').innerText = "Conectando a " + vm + "...";
+
+        if (logInterval) clearInterval(logInterval);
+
+        logInterval = setInterval(() => {
+          fetch(`/get-logs?vm=${encodeURIComponent(vm)}&file=${encodeURIComponent(logFile)}`)
+                  .then(response => response.text())
+                  .then(data => {
+                    const viewer = document.getElementById('log-viewer');
+                    viewer.innerText = data;
+                    viewer.scrollTop = viewer.scrollHeight; // Auto-scroll al final
+                  })
+                  .catch(err => console.error("Error obteniendo logs", err));
+        }, 2000); // Consulta cada 2 segundos
+      }
+    </script>
 
     <script>
       function seleccionarBase(valor, elementoBoton) {

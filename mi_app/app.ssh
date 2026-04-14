@@ -1,0 +1,24 @@
+#!/bin/bash
+# app.sh: Escribe la fecha y un contador en un archivo de logs
+
+ARCHIVO_LOG="${1:-registro.txt}"
+INTERVALO="${2:-2}"
+
+# Archivo oculto para guardar el estado del contador si el servicio se reinicia
+ARCHIVO_CONTADOR=".contador.state"
+
+if [ -f "$ARCHIVO_CONTADOR" ]; then
+CONTADOR=$(cat "$ARCHIVO_CONTADOR")
+else
+CONTADOR=1
+fi
+
+while true; do
+FECHA=$(date '+%Y-%m-%d %H:%M:%S')
+echo "Ejecución #$CONTADOR - $FECHA" >> "$ARCHIVO_LOG"
+CONTADOR=$((CONTADOR + 1))
+echo "$CONTADOR" > "$ARCHIVO_CONTADOR"
+
+# Pausa para no saturar el disco (simula trabajo)
+sleep "$INTERVALO"
+done

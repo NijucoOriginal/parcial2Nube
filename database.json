@@ -1,0 +1,44 @@
+{
+  "templates": [
+    {
+      "Nombre": "DebianPrueba",
+      "Descripcion": "Es debian pero en prueba",
+      "PlantillaBase": "Debian13Clon",
+      "LlaveGenerada": true,
+      "NombreLlave": "rsa_DebianPrueba.pem"
+    }
+  ],
+  "discos": [
+    {
+      "Nombre": "Disco1",
+      "Ruta": "C:\\Users\\NICOLAS PEÑA RINCON\\VirtualBox VMs\\Discos Compartidos\\Disco1.vdi",
+      "PlantillaOrigen": "DebianPrueba",
+      "SistemaOperativo": "Debian13Clon",
+      "Estado": "Conectado",
+      "ConectadoA": "nicolasvirtual",
+      "TieneSO": true,
+      "Tipo": "plantilla"
+    }
+  ],
+  "user_vms": [
+    {
+      "Nombre": "nicolasvirtual",
+      "Descripcion": "Es nicolas pero virtual",
+      "PlantillaBase": "DebianPrueba",
+      "DiscoAsignado": "Disco1",
+      "DiscoTieneSO": true,
+      "LlaveGenerada": true,
+      "NombreLlave": "rsa_user_nicolasvirtual.pem"
+    },
+    {
+      "Nombre": "noeVirtual",
+      "Descripcion": "Es noeh pero virtual",
+      "PlantillaBase": "DebianPrueba",
+      "DiscoAsignado": "Disco1",
+      "DiscoTieneSO": true,
+      "LlaveGenerada": false,
+      "NombreLlave": ""
+    }
+  ],
+  "llaves_activas": true
+}

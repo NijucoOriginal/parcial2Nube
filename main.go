@@ -5,9 +5,13 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,8 +24,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
 type TemplateVM struct {
@@ -77,6 +79,42 @@ type PageData struct {
 	LlavesActivas bool
 	Error         string
 	Info          string
+}
+
+// ==========================================
+// PERSISTENCIA DE DATOS
+// ==========================================
+type AppState struct {
+	Templates        []TemplateVM      `json:"templates"`
+	Discos           []DiscoCompartido `json:"discos"`
+	UserVMs          []UserVM          `json:"user_vms"`
+	LlavesSshActivas bool              `json:"llaves_activas"`
+}
+
+func saveDB() {
+	state := AppState{
+		Templates:        templatesDB,
+		Discos:           ListaDiscos,
+		UserVMs:          ListaUserVMs,
+		LlavesSshActivas: LlavesSshActivas,
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err == nil {
+		os.WriteFile("database.json", data, 0644)
+	}
+}
+
+func loadDB() {
+	data, err := os.ReadFile("database.json")
+	if err == nil {
+		var state AppState
+		if err := json.Unmarshal(data, &state); err == nil {
+			templatesDB = state.Templates
+			ListaDiscos = state.Discos
+			ListaUserVMs = state.UserVMs
+			LlavesSshActivas = state.LlavesSshActivas
+		}
+	}
 }
 
 func init() {
@@ -491,6 +529,8 @@ func redirectWithInfo(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 func main() {
+	loadDB() // <--- AGREGA ESTA LÍNEA AQUÍ
+
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/add", handleAddTemplate)
 	http.HandleFunc("/create-key", handleCreateKey)
@@ -507,6 +547,11 @@ func main() {
 	http.HandleFunc("/create-user-key", handleCreateUserKey)
 	http.HandleFunc("/verify-user-access", handleVerifyUserAccess)
 	http.HandleFunc("/delete-user-vm", handleDeleteUserVM)
+
+	// Rutas para Despliegue y systemd
+	http.HandleFunc("/deploy", handleDeploy)
+	http.HandleFunc("/service-action", handleServiceAction)
+	http.HandleFunc("/get-logs", handleGetLogs)
 
 	fmt.Println("Servidor corriendo en http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -563,6 +608,7 @@ func handleAddTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	templatesDB = append(templatesDB, nuevaPlantilla)
+	saveDB()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -596,7 +642,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 		if t.Nombre == nombrePlantilla && !t.LlaveGenerada {
 
-			rootPassword := "1234"
+			rootPassword := "nicolas"
 			vmIP := "127.0.0.1"
 			vmPort := "2224"
 
@@ -669,6 +715,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 			templatesDB[i].LlaveGenerada = true
 			templatesDB[i].NombreLlave = nombreLlavePrivada
+			saveDB()
 			logFlow("CREATE-KEY-ROOT", "Llaves root generadas correctamente para plantilla=%s", nombrePlantilla)
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
@@ -870,6 +917,7 @@ func handleCreateDisk(w http.ResponseWriter, r *http.Request) {
 		Tipo:             tipoRegistrado,
 	})
 	updateDiskStatusLocked(len(ListaDiscos) - 1)
+	saveDB()
 	logFlow("CREATE-DISK", "Disco registrado correctamente nombre=%s ruta=%s tipo=%s", nombreDisco, ruta, tipoRegistrado)
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -919,6 +967,7 @@ func handleDeleteDisk(w http.ResponseWriter, r *http.Request) {
 			ListaUserVMs[i].DiscoTieneSO = false
 		}
 	}
+	saveDB()
 	dbMutex.Unlock()
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -985,6 +1034,7 @@ func handleConnectDisk(w http.ResponseWriter, r *http.Request) {
 			ListaUserVMs[i].DiscoTieneSO = diskHasSO
 		}
 	}
+	saveDB()
 	dbMutex.Unlock()
 	logFlow("CONNECT-DISK", "Conexión aplicada disco=%s vm=%s", nombreDisco, targetVM)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -1021,6 +1071,7 @@ func handleDisconnectDisk(w http.ResponseWriter, r *http.Request) {
 			ListaUserVMs[i].DiscoTieneSO = false
 		}
 	}
+	saveDB()
 	dbMutex.Unlock()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1129,6 +1180,7 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 			updateDiskStatusLocked(i)
 		}
 	}
+	saveDB()
 	dbMutex.Unlock()
 
 	fmt.Println("Proceso terminado. Actualizando interfaz...")
@@ -1295,6 +1347,7 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 		ListaUserVMs[idx].LlaveGenerada = true
 		ListaUserVMs[idx].NombreLlave = nombreLlavePrivada
 	}
+	saveDB()
 	dbMutex.Unlock()
 	logFlow("CREATE-USER-KEY", "Usuario y llaves creados/verificados para vm=%s llave=%s", nombreMV, nombreLlavePrivada)
 
@@ -1340,6 +1393,7 @@ func handleDeleteUserVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ListaUserVMs = nuevaLista
+	saveDB()
 	dbMutex.Unlock()
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -1459,4 +1513,234 @@ func handleVerifyUserAccess(w http.ResponseWriter, r *http.Request) {
 	logFlow("VERIFY-USER-ACCESS", "Verificación OK vm=%s home=%s", nombreMV, homePath)
 
 	redirectWithInfo(w, r, "Verificación exitosa: conexión SSH e interacción completadas. HOME del usuario: "+homePath)
+}
+
+// ==========================================
+// FUNCIONES DE DESPLIEGUE Y SYSTEMD (PARCIAL 2)
+// ==========================================
+
+func handleDeploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	// Aumentar el límite de tamaño para la subida (ej. 10MB)
+	r.ParseMultipartForm(10 << 20)
+
+	targetVM := strings.TrimSpace(r.FormValue("target_vm"))
+	rutaDestino := strings.TrimSpace(r.FormValue("ruta_destino"))
+	nombreServicio := strings.TrimSpace(r.FormValue("nombre_servicio"))
+	parametros := strings.TrimSpace(r.FormValue("parametros"))
+
+	if targetVM == "" || rutaDestino == "" || nombreServicio == "" {
+		redirectWithError(w, r, "Faltan datos obligatorios para el despliegue.")
+		return
+	}
+
+	// Leer el archivo .zip subido
+	file, _, err := r.FormFile("app_zip")
+	if err != nil {
+		redirectWithError(w, r, "Error al leer el archivo .zip subido.")
+		return
+	}
+	defer file.Close()
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		redirectWithError(w, r, "Error al procesar el archivo .zip.")
+		return
+	}
+	// Codificamos en Base64 para transferirlo de forma segura por la terminal SSH
+	zipBase64 := base64.StdEncoding.EncodeToString(fileBytes)
+
+	// Configurar red e iniciar MV si no está encendida
+	vmPort, _ := getFreeLocalPort()
+	runVBoxManage("modifyvm", targetVM, "--natpf1", "delete", "regla_ssh_deploy")
+	runVBoxManage("modifyvm", targetVM, "--natpf1", fmt.Sprintf("regla_ssh_deploy,tcp,127.0.0.1,%s,,22", vmPort))
+	runVBoxManage("startvm", targetVM, "--type", "headless")
+
+	// Conectar como root (necesario para systemd)
+	host := fmt.Sprintf("127.0.0.1:%s", vmPort)
+	client, err := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 30*time.Second)
+	if err != nil {
+		redirectWithError(w, r, "No fue posible conectar por SSH como root para desplegar la app.")
+		return
+	}
+	defer client.Close()
+
+	session, _ := client.NewSession()
+	defer session.Close()
+
+	// 1. Instalar unzip, crear directorio, decodificar ZIP y extraer
+	deployCmd := fmt.Sprintf(`
+        apt-get update && apt-get install -y unzip;
+        mkdir -p %s;
+        echo "%s" | base64 -d > /tmp/app.zip;
+        unzip -o /tmp/app.zip -d %s;
+        chmod +x %s/*.sh
+    `, rutaDestino, zipBase64, rutaDestino, rutaDestino)
+
+	if err := runSSHCommandLogged(session, deployCmd); err != nil {
+		redirectWithError(w, r, "Error al transferir o descomprimir la aplicación en la MV.")
+		return
+	}
+
+	// 2. Crear archivo .service de systemd
+	if !strings.HasSuffix(nombreServicio, ".service") {
+		nombreServicio += ".service"
+	}
+
+	// Aseguramos de ejecutar el script en bash. Asumimos que el script se llama app.sh
+	execStart := fmt.Sprintf("/bin/bash %s/app.sh %s", rutaDestino, parametros)
+
+	serviceContent := fmt.Sprintf(`[Unit]
+Description=Aplicacion Desplegada Automaticamente - %s
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%s
+WorkingDirectory=%s
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+`, nombreServicio, execStart, rutaDestino)
+
+	serviceBase64 := base64.StdEncoding.EncodeToString([]byte(serviceContent))
+
+	serviceSession, _ := client.NewSession()
+	defer serviceSession.Close()
+
+	// Inyectar el servicio, recargar systemd y arrancar
+	serviceCmd := fmt.Sprintf(`
+        echo "%s" | base64 -d > /etc/systemd/system/%s;
+        systemctl daemon-reload;
+        systemctl enable %s;
+        systemctl start %s
+    `, serviceBase64, nombreServicio, nombreServicio, nombreServicio)
+
+	if err := runSSHCommandLogged(serviceSession, serviceCmd); err != nil {
+		redirectWithError(w, r, "Error al crear o iniciar el servicio systemd.")
+		return
+	}
+
+	redirectWithInfo(w, r, "¡Aplicación desplegada y servicio systemd configurado exitosamente!")
+}
+
+func handleServiceAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	targetVM := strings.TrimSpace(r.FormValue("target_vm"))
+	nombreServicio := strings.TrimSpace(r.FormValue("nombre_servicio"))
+	accion := strings.TrimSpace(r.FormValue("accion"))
+
+	if targetVM == "" || nombreServicio == "" || accion == "" {
+		redirectWithError(w, r, "Faltan datos para ejecutar la acción.")
+		return
+	}
+
+	vmPort, _ := getFreeLocalPort()
+	runVBoxManage("modifyvm", targetVM, "--natpf1", "delete", "regla_ssh_action")
+	runVBoxManage("modifyvm", targetVM, "--natpf1", fmt.Sprintf("regla_ssh_action,tcp,127.0.0.1,%s,,22", vmPort))
+
+	host := fmt.Sprintf("127.0.0.1:%s", vmPort)
+	client, err := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 15*time.Second)
+	if err != nil {
+		redirectWithError(w, r, "No hay conexión con la MV. Asegúrate de que esté encendida.")
+		return
+	}
+	defer client.Close()
+
+	session, _ := client.NewSession()
+	defer session.Close()
+
+	var comando string
+	if accion == "status" {
+		comando = fmt.Sprintf("systemctl status %s", nombreServicio)
+	} else {
+		comando = fmt.Sprintf("systemctl %s %s", accion, nombreServicio)
+	}
+
+	out, err := session.CombinedOutput(comando)
+
+	// Si es status, lo mostramos como info aunque devuelva error (systemctl status devuelve código != 0 si no está corriendo)
+	mensajeOut := strings.ReplaceAll(string(out), "\n", " | ")
+	if accion == "status" {
+		redirectWithInfo(w, r, fmt.Sprintf("Status de %s: %s", nombreServicio, string(out)))
+		return
+	}
+
+	if err != nil {
+		redirectWithError(w, r, fmt.Sprintf("Error ejecutando '%s': %s", accion, mensajeOut))
+		return
+	}
+
+	redirectWithInfo(w, r, fmt.Sprintf("Comando '%s' ejecutado exitosamente en %s.", accion, nombreServicio))
+}
+
+func handleGetLogs(w http.ResponseWriter, r *http.Request) {
+	targetVM := r.URL.Query().Get("vm")
+	logFile := r.URL.Query().Get("file")
+
+	if targetVM == "" || logFile == "" {
+		http.Error(w, "Faltan parámetros", http.StatusBadRequest)
+		return
+	}
+
+	// Buscamos dinámicamente qué puerto tiene abierto esa MV para SSH
+	// (buscamos en la configuración de VirtualBox para no crear reglas basura repetidas)
+	out, err := runVBoxManage("showvminfo", targetVM, "--machinereadable")
+	if err != nil {
+		http.Error(w, "MV apagada o inaccesible", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Expresión para buscar cualquier reenvío al puerto 22
+	vmPort := ""
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "Forwarding") && strings.Contains(line, ",22") {
+			parts := strings.Split(line, ",")
+			if len(parts) >= 4 {
+				vmPort = parts[3] // El puerto local
+				break
+			}
+		}
+	}
+
+	if vmPort == "" {
+		http.Error(w, "No hay puerto SSH configurado para esta MV actualmente.", http.StatusServiceUnavailable)
+		return
+	}
+
+	host := fmt.Sprintf("127.0.0.1:%s", vmPort)
+	// Para lectura de logs usamos un timeout muy corto para no colgar la interfaz web
+	client, err := openSSHClientWithPasswords(host, "root", []string{"1234", "nicolas"})
+	if err != nil {
+		http.Error(w, "Esperando a que SSH responda...", http.StatusServiceUnavailable)
+		return
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		http.Error(w, "Error de sesión", http.StatusInternalServerError)
+		return
+	}
+	defer session.Close()
+
+	// Ejecutamos 'tail -n 15' equivalente para traer las últimas líneas
+	outLogs, errLogs := session.CombinedOutput(fmt.Sprintf("tail -n 15 %s", logFile))
+	if errLogs != nil {
+		w.Write([]byte(fmt.Sprintf("Esperando a que se cree el archivo log en %s...", logFile)))
+		return
+	}
+
+	w.Write(outLogs)
 }
