@@ -1,0 +1,54 @@
+{
+  "templates": [
+    {
+      "Nombre": "Debian 13",
+      "Descripcion": "Servidor Web",
+      "PlantillaBase": "DebianCLI",
+      "LlaveGenerada": true,
+      "NombreLlave": "rsa_Debian 13.pem"
+    }
+  ],
+  "discos": [
+    {
+      "Nombre": "DiscoDB_1",
+      "Ruta": "C:\\Users\\johan\\VirtualBox VMs\\Discos Compartidos\\DiscoDB_1.vdi",
+      "PlantillaOrigen": "Debian 13",
+      "SistemaOperativo": "DebianCLI",
+      "Estado": "Conectado",
+      "ConectadoA": "johanprueba",
+      "TieneSO": true,
+      "Tipo": "plantilla"
+    }
+  ],
+  "user_vms": [
+    {
+      "Nombre": "johanprueba",
+      "Descripcion": "Servidor Web Python",
+      "PlantillaBase": "Debian 13",
+      "DiscoAsignado": "DiscoDB_1",
+      "DiscoTieneSO": true,
+      "LlaveGenerada": true,
+      "NombreLlave": "rsa_user_johanprueba.pem"
+    }
+  ],
+  "services": [
+    {
+      "VMName": "johanprueba",
+      "ServiceName": "demo-flask3.service",
+      "RuntimeBinary": "python3",
+      "NatRuleName": "regla_app_demo_flask3",
+      "AppHostPort": "59884",
+      "AppGuestPort": "5000",
+      "AppEndpoint": "http://127.0.0.1:59884",
+      "DestinationPath": "/home/usuario_mv/demo_flask4",
+      "StartCommand": "python3 app.py",
+      "CounterFile": "app_runs.log",
+      "ZipFilename": "demo_servicio_flask.zip",
+      "Status": "active",
+      "Enabled": "disabled",
+      "LastLogTail": "1 - 2026-04-13 19:59:05\n2 - ACTION_START - 2026-04-13 19:59:05\n3 - ACTION_STOP - 2026-04-13 19:59:43\n4 - 2026-04-13 20:03:06\n5 - ACTION_START - 2026-04-13 20:03:06",
+      "LastChecked": "2026-04-13 20:03:06"
+    }
+  ],
+  "llaves_ssh_activas": true
+}

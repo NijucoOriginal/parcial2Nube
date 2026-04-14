@@ -204,6 +204,48 @@
         margin-bottom: 1.5rem;
         border-radius: 4px;
       }
+      .module-nav {
+        display: flex;
+        gap: 0.8rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.5rem;
+      }
+      .module-link {
+        padding: 0.55rem 0.9rem;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(30, 41, 59, 0.85);
+        color: var(--text-main);
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+      .module-link:hover {
+        border-color: var(--primary);
+      }
+      .state-tools {
+        display: flex;
+        justify-content: flex-end;
+        margin: -0.4rem 0 1.2rem;
+      }
+      .module-block {
+        margin-bottom: 2.2rem;
+        padding: 1rem;
+        border: 1px dashed var(--border);
+        border-radius: 14px;
+        background: rgba(15, 23, 42, 0.55);
+      }
+      .module-header {
+        margin: 0.2rem 0 1rem;
+        padding: 0.4rem 0.2rem;
+      }
+      .module-header h2 {
+        margin-bottom: 0.35rem;
+      }
+      .module-header p {
+        color: var(--text-muted);
+        font-size: 0.92rem;
+      }
     </style>
   </head>
   <body>
@@ -217,6 +259,32 @@
       {{if .Info}}
       <div class="alert-success">{{.Info}}</div>
       {{end}}
+
+      <div class="module-nav">
+        <a class="module-link" href="#mod-vm">Módulo 1: Gestión de Máquinas Virtuales</a>
+        <a class="module-link" href="#mod-services">Módulo 2: Gestión de Servicios</a>
+      </div>
+
+      <div class="state-tools">
+        <form action="/reset-state" method="POST" style="display: inline">
+          <button
+            type="submit"
+            class="btn btn-danger"
+            onclick="return confirm('Esto limpiará la persistencia del dashboard (JSON) y reiniciará la vista. No elimina automáticamente VMs/discos en VirtualBox. ¿Deseas continuar?');"
+          >
+            Limpiar persistencia (JSON)
+          </button>
+        </form>
+      </div>
+
+      <div class="module-block" id="mod-vm">
+        <div class="module-header">
+          <h2>Módulo 1: Gestión de Máquinas Virtuales</h2>
+          <p>
+            Administra plantillas, discos multiconexión y máquinas virtuales de usuario,
+            incluyendo creación de llaves y verificación SSH.
+          </p>
+        </div>
 
       <section>
         <h2>Agregar plantilla para mv</h2>
@@ -266,7 +334,7 @@
               <button
                 class="btn-template"
                 type="button"
-                onclick="seleccionarBase('Debi', this)"
+                onclick="seleccionarBase('DebianCLI', this)"
               >
                 <span class="icon-deb">D13</span> Debian 13
               </button>
@@ -726,6 +794,163 @@
           Nota: El botón Probar acceso SSH valida en tiempo real que el usuario de la MV pueda autenticarse con su llave y ejecutar una interacción dentro del sistema.
         </small>
       </section>
+
+      </div>
+
+      <div class="module-block" id="mod-services">
+        <div class="module-header">
+          <h2>Módulo 2: Gestión de Servicios</h2>
+          <p>
+            Despliega aplicaciones por ZIP en la VM y controla su ciclo de vida con systemd
+            (iniciar, detener, reiniciar, habilitar, deshabilitar y estado).
+          </p>
+        </div>
+
+      <section>
+        <h2>Módulo de Gestión de Servicios (Fase 2)</h2>
+
+        <form
+          action="/deploy-service"
+          method="POST"
+          enctype="multipart/form-data"
+          style="
+            background-color: var(--bg-dark);
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+          "
+        >
+          <h3>Desplegar aplicación ZIP y registrar servicio systemd</h3>
+
+          <div class="form-group" style="margin-top: 1rem">
+            <label for="vm_name">Máquina virtual destino</label>
+            <select id="vm_name" name="vm_name" required>
+              <option value="" disabled selected>Selecciona una MV...</option>
+              {{range .UserVMs}} {{if .LlaveGenerada}}
+              <option value="{{.Nombre}}">{{.Nombre}}</option>
+              {{end}} {{end}}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="service_name">Nombre de servicio (ej. miapp.service)</label>
+            <input type="text" id="service_name" name="service_name" required placeholder="miapp.service" />
+          </div>
+
+          <div class="form-group">
+            <label for="runtime_binary">Runtime/binario permitido</label>
+            <select id="runtime_binary" name="runtime_binary" required>
+              <option value="python3" selected>python3</option>
+              <option value="node">node</option>
+              <option value="bash">bash</option>
+              <option value="java">java</option>
+              <option value="go">go</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="destination_path">Carpeta destino en la VM</label>
+            <input type="text" id="destination_path" name="destination_path" required placeholder="/home/usuario_mv/app" />
+          </div>
+
+          <div class="form-group">
+            <label for="start_command">Comando de inicio de la aplicación</label>
+            <input type="text" id="start_command" name="start_command" required placeholder="python3 main.py" />
+          </div>
+
+          <div class="form-group">
+            <label for="counter_file">Archivo de trazas incrementales</label>
+            <input type="text" id="counter_file" name="counter_file" placeholder="app_runs.log" />
+          </div>
+
+          <div class="form-group">
+            <label for="app_zip">Archivo ZIP de la aplicación</label>
+            <input
+              type="file"
+              id="app_zip"
+              name="app_zip"
+              accept=".zip,application/zip"
+              required
+              style="
+                width: 100%;
+                padding: 0.75rem;
+                background-color: var(--bg-dark);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                color: var(--text-main);
+              "
+            />
+          </div>
+
+          <button type="submit" class="btn btn-primary">Desplegar e instalar servicio</button>
+        </form>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>VM</th>
+                <th>Servicio</th>
+                <th>Estado</th>
+                <th>Habilitado</th>
+                <th>Última revisión</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Services}}
+              <tr>
+                <td>{{.VMName}}</td>
+                <td>{{.ServiceName}}</td>
+                <td>{{if .Status}}{{.Status}}{{else}}desconocido{{end}}</td>
+                <td>{{if .Enabled}}{{.Enabled}}{{else}}desconocido{{end}}</td>
+                <td>{{if .LastChecked}}{{.LastChecked}}{{else}}-{{end}}</td>
+                <td class="actions-cell">
+                  <form action="/service-action" method="POST" style="display:inline">
+                    <input type="hidden" name="vm_name" value="{{.VMName}}" />
+                    <input type="hidden" name="service_name" value="{{.ServiceName}}" />
+                    <button class="btn btn-secondary" type="submit" name="action" value="start">Iniciar</button>
+                    <button class="btn btn-secondary" type="submit" name="action" value="stop">Detener</button>
+                    <button class="btn btn-secondary" type="submit" name="action" value="restart">Reiniciar</button>
+                    <button class="btn btn-secondary" type="submit" name="action" value="enable">Habilitar</button>
+                    <button class="btn btn-secondary" type="submit" name="action" value="disable">Deshabilitar</button>
+                    <button class="btn btn-accent" type="submit" name="action" value="status">Actualizar estado</button>
+                    <button
+                      class="btn btn-danger"
+                      type="submit"
+                      name="action"
+                      value="delete-app"
+                      onclick="return confirm('Se eliminará el servicio, la carpeta de la aplicación y la configuración de red asociada. ¿Deseas continuar?');"
+                    >
+                      Eliminar app
+                    </button>
+                  </form>
+                </td>
+              </tr>
+              <tr>
+                <td colspan="6" style="background: rgba(0, 0, 0, 0.15)">
+                  <strong>Destino:</strong> {{.DestinationPath}}<br />
+                  <strong>Comando:</strong> {{.StartCommand}}<br />
+                  <strong>Runtime:</strong> {{if .RuntimeBinary}}{{.RuntimeBinary}}{{else}}(no definido){{end}}<br />
+                  <strong>Puerto app (host->guest):</strong> {{if .AppHostPort}}{{.AppHostPort}} -> {{.AppGuestPort}}{{else}}pendiente{{end}}<br />
+                  <strong>Endpoint publicado:</strong> {{if .AppEndpoint}}{{.AppEndpoint}}{{else}}pendiente{{end}}<br />
+                  <strong>ZIP:</strong> {{.ZipFilename}}<br />
+                  <strong>Últimas líneas del archivo de ejecución:</strong>
+                  <pre style="white-space: pre-wrap; margin-top: 0.6rem; color: #cbd5e1">{{if .LastLogTail}}{{.LastLogTail}}{{else}}Sin datos aún. Usa "Actualizar estado" tras iniciar el servicio.{{end}}</pre>
+                </td>
+              </tr>
+              {{else}}
+              <tr>
+                <td colspan="6" style="text-align: center; color: var(--text-muted)">
+                  Aún no hay servicios desplegados. Sube un ZIP y crea el servicio desde el formulario.
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      </div>
     </div>
 
     <script>
