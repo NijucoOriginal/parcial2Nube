@@ -74,10 +74,52 @@ type ServiceDeployment struct {
 	LastChecked     string
 }
 
+type LBServer struct {
+	ID          string
+	Nombre      string
+	VMName      string
+	IP          string
+	Port        int
+	Habilitado  bool
+	AutoCreated bool
+}
+
+type LoadBalancer struct {
+	Nombre            string
+	Descripcion       string
+	HaproxyVM         string
+	ListenPort        int
+	BackendPort       int
+	Algoritmo         string
+	Servers           []LBServer
+	AutoEnabled       bool
+	HighCPUThreshold  float64
+	LowCPUThreshold   float64
+	SustainSeconds    int
+	SampleSeconds     int
+	ScaleTemplateVM   string
+	ScaleNamePrefix   string
+	MinServers        int
+	MaxServers        int
+	LastAvgCPU        float64
+	LastAutoAction    string
+	LastAutoDetail    string
+	LastAutoCheckTime string
+}
+
+type LBRuntimeState struct {
+	AboveSeconds int
+	BelowSeconds int
+	LastSampleAt time.Time
+}
+
 var ListaDiscos []DiscoCompartido
 var ListaUserVMs []UserVM // Lista para el nuevo dashboard
 var ListaServicios []ServiceDeployment
+var ListaBalanceadores []LoadBalancer
 var LlavesSshActivas bool = false
+
+var lbRuntimeState = map[string]*LBRuntimeState{}
 
 var (
 	templatesDB []TemplateVM
@@ -87,7 +129,8 @@ var (
 
 const vboxCommandTimeout = 12 * time.Second
 const vboxCreateDiskTimeout = 10 * time.Minute
-const sshBootTimeout = 2 * time.Minute
+const sshBootTimeout = 3 * time.Minute
+const sshDialTimeout = 15 * time.Second
 const diskSizeNewMB = 5120
 const diskSizeMinCloneMB = 10240
 
@@ -100,13 +143,17 @@ var allowedRuntimeBinaries = map[string]bool{
 }
 
 type PageData struct {
-	Templates     []TemplateVM
-	Discos        []DiscoCompartido
-	UserVMs       []UserVM // Pasamos los usuarios al HTML
-	Services      []ServiceDeployment
-	LlavesActivas bool
-	Error         string
-	Info          string
+	Templates           []TemplateVM
+	Discos              []DiscoCompartido
+	UserVMs             []UserVM // Pasamos los usuarios al HTML
+	Services            []ServiceDeployment
+	LoadBalancers       []LoadBalancer
+	AutoScaleTotalByLB  map[string]int
+	AutoScaleActiveByLB map[string]int
+	ActiveModule        string
+	LlavesActivas       bool
+	Error               string
+	Info                string
 }
 
 type AppState struct {
@@ -114,6 +161,7 @@ type AppState struct {
 	Discos           []DiscoCompartido   `json:"discos"`
 	UserVMs          []UserVM            `json:"user_vms"`
 	Services         []ServiceDeployment `json:"services"`
+	LoadBalancers    []LoadBalancer      `json:"load_balancers"`
 	LlavesSshActivas bool                `json:"llaves_ssh_activas"`
 }
 
@@ -132,6 +180,7 @@ func saveAppStateLocked() error {
 		Discos:           ListaDiscos,
 		UserVMs:          ListaUserVMs,
 		Services:         ListaServicios,
+		LoadBalancers:    ListaBalanceadores,
 		LlavesSshActivas: LlavesSshActivas,
 	}
 
@@ -174,6 +223,24 @@ func normalizeLoadedStateLocked() {
 			}
 		}
 	}
+
+	for i := range ListaBalanceadores {
+		sanitizeLBDefaults(&ListaBalanceadores[i])
+		if strings.TrimSpace(ListaBalanceadores[i].LastAutoAction) == "" {
+			ListaBalanceadores[i].LastAutoAction = "N/A"
+		}
+		if strings.TrimSpace(ListaBalanceadores[i].LastAutoDetail) == "" {
+			ListaBalanceadores[i].LastAutoDetail = "Sin eventos recientes"
+		}
+		for j := range ListaBalanceadores[i].Servers {
+			if strings.TrimSpace(ListaBalanceadores[i].Servers[j].ID) == "" {
+				ListaBalanceadores[i].Servers[j].ID = fmt.Sprintf("srv-%d-%d", i+1, j+1)
+			}
+			if ListaBalanceadores[i].Servers[j].Port <= 0 {
+				ListaBalanceadores[i].Servers[j].Port = ListaBalanceadores[i].BackendPort
+			}
+		}
+	}
 }
 
 func loadAppState() error {
@@ -197,6 +264,7 @@ func loadAppState() error {
 	ListaDiscos = state.Discos
 	ListaUserVMs = state.UserVMs
 	ListaServicios = state.Services
+	ListaBalanceadores = state.LoadBalancers
 	LlavesSshActivas = state.LlavesSshActivas
 	if !LlavesSshActivas {
 		for _, t := range templatesDB {
@@ -844,7 +912,7 @@ func openSSHClientWithPasswords(host string, user string, passwords []string) (*
 				ssh.Password(pwd),
 			},
 			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-			Timeout:         10 * time.Second,
+			Timeout:         sshDialTimeout,
 		}
 
 		client, err := ssh.Dial("tcp", host, sshConfig)
@@ -883,7 +951,7 @@ func openSSHClientWithPrivateKey(host string, user string, privateKeyPEM []byte)
 			ssh.PublicKeys(signer),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
+		Timeout:         sshDialTimeout,
 	}
 
 	client, err := ssh.Dial("tcp", host, sshConfig)
@@ -922,22 +990,1042 @@ func publicAuthorizedKeyFromPrivateKeyPEM(privateKeyPEM []byte) (string, error) 
 }
 
 func renderIndexWithErrorLocked(w http.ResponseWriter, errMsg string) {
+	totalByLB, activeByLB := buildAutoScaleCountMaps(ListaBalanceadores)
 	tmpl.Execute(w, PageData{
-		Templates:     templatesDB,
-		Discos:        ListaDiscos,
-		UserVMs:       ListaUserVMs,
-		Services:      ListaServicios,
-		LlavesActivas: hasConfiguredKeys(),
-		Error:         errMsg,
+		Templates:           templatesDB,
+		Discos:              ListaDiscos,
+		UserVMs:             ListaUserVMs,
+		Services:            ListaServicios,
+		LoadBalancers:       ListaBalanceadores,
+		AutoScaleTotalByLB:  totalByLB,
+		AutoScaleActiveByLB: activeByLB,
+		ActiveModule:        "vm",
+		LlavesActivas:       hasConfiguredKeys(),
+		Error:               errMsg,
 	})
 }
 
+func buildAutoScaleCountMaps(lbs []LoadBalancer) (map[string]int, map[string]int) {
+	totalByLB := make(map[string]int)
+	activeByLB := make(map[string]int)
+	for _, lb := range lbs {
+		name := strings.TrimSpace(lb.Nombre)
+		if name == "" {
+			continue
+		}
+		for _, srv := range lb.Servers {
+			if !srv.AutoCreated {
+				continue
+			}
+			totalByLB[name]++
+			if srv.Habilitado {
+				activeByLB[name]++
+			}
+		}
+	}
+	return totalByLB, activeByLB
+}
+
+func sanitizeModuleName(module string) string {
+	mod := strings.ToLower(strings.TrimSpace(module))
+	if mod == "services" || mod == "lb" || mod == "vm" {
+		return mod
+	}
+	return "vm"
+}
+
+func moduleFromRequest(r *http.Request) string {
+	if r == nil {
+		return "vm"
+	}
+
+	if m := sanitizeModuleName(r.FormValue("module")); m != "vm" || strings.EqualFold(strings.TrimSpace(r.FormValue("module")), "vm") {
+		if raw := strings.TrimSpace(r.FormValue("module")); raw != "" {
+			return m
+		}
+	}
+
+	if m := sanitizeModuleName(r.URL.Query().Get("module")); m != "vm" || strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("module")), "vm") {
+		if raw := strings.TrimSpace(r.URL.Query().Get("module")); raw != "" {
+			return m
+		}
+	}
+
+	referer := strings.TrimSpace(r.Referer())
+	if referer == "" {
+		return "vm"
+	}
+	refURL, err := url.Parse(referer)
+	if err != nil {
+		return "vm"
+	}
+	rawRef := strings.TrimSpace(refURL.Query().Get("module"))
+	if rawRef == "" {
+		return "vm"
+	}
+	return sanitizeModuleName(rawRef)
+}
+
+func buildHomeURLWithMessages(r *http.Request, errMsg string, infoMsg string) string {
+	vals := url.Values{}
+	vals.Set("module", moduleFromRequest(r))
+	if strings.TrimSpace(errMsg) != "" {
+		vals.Set("error", errMsg)
+	}
+	if strings.TrimSpace(infoMsg) != "" {
+		vals.Set("info", infoMsg)
+	}
+	return "/?" + vals.Encode()
+}
+
 func redirectWithError(w http.ResponseWriter, r *http.Request, errMsg string) {
-	http.Redirect(w, r, "/?error="+url.QueryEscape(errMsg), http.StatusSeeOther)
+	http.Redirect(w, r, buildHomeURLWithMessages(r, errMsg, ""), http.StatusSeeOther)
 }
 
 func redirectWithInfo(w http.ResponseWriter, r *http.Request, msg string) {
-	http.Redirect(w, r, "/?info="+url.QueryEscape(msg), http.StatusSeeOther)
+	http.Redirect(w, r, buildHomeURLWithMessages(r, "", msg), http.StatusSeeOther)
+}
+
+func findLBIndexByNameLocked(name string) int {
+	for i := range ListaBalanceadores {
+		if strings.EqualFold(ListaBalanceadores[i].Nombre, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+func sanitizeLBDefaults(lb *LoadBalancer) {
+	if lb.ListenPort <= 0 {
+		lb.ListenPort = 8080
+	}
+	if lb.BackendPort <= 0 {
+		lb.BackendPort = 5000
+	}
+	if strings.TrimSpace(lb.Algoritmo) == "" {
+		lb.Algoritmo = "roundrobin"
+	}
+	if lb.Algoritmo != "roundrobin" && lb.Algoritmo != "leastconn" && lb.Algoritmo != "source" {
+		lb.Algoritmo = "roundrobin"
+	}
+	if lb.SampleSeconds <= 0 {
+		lb.SampleSeconds = 10
+	}
+	if lb.SustainSeconds <= 0 {
+		lb.SustainSeconds = 60
+	}
+	if lb.HighCPUThreshold <= 0 {
+		lb.HighCPUThreshold = 75
+	}
+	if lb.LowCPUThreshold <= 0 {
+		lb.LowCPUThreshold = 25
+	}
+	if lb.HighCPUThreshold > 100 {
+		lb.HighCPUThreshold = 100
+	}
+	if lb.LowCPUThreshold > 100 {
+		lb.LowCPUThreshold = 100
+	}
+	if lb.HighCPUThreshold <= lb.LowCPUThreshold {
+		lb.HighCPUThreshold = lb.LowCPUThreshold + 5
+		if lb.HighCPUThreshold > 100 {
+			lb.LowCPUThreshold = 95
+			lb.HighCPUThreshold = 100
+		}
+	}
+	if lb.MinServers < 1 {
+		lb.MinServers = 1
+	}
+	if lb.MaxServers < lb.MinServers {
+		lb.MaxServers = lb.MinServers
+	}
+	if strings.TrimSpace(lb.ScaleNamePrefix) == "" {
+		lb.ScaleNamePrefix = "auto-app"
+	}
+}
+
+func buildHAProxyConfig(lb LoadBalancer) string {
+	algorithm := strings.TrimSpace(lb.Algoritmo)
+	if algorithm == "" {
+		algorithm = "roundrobin"
+	}
+
+	lines := []string{
+		"global",
+		"    daemon",
+		"    maxconn 256",
+		"",
+		"defaults",
+		"    mode http",
+		"    timeout connect 5s",
+		"    timeout client  30s",
+		"    timeout server  30s",
+		"",
+		fmt.Sprintf("frontend fe_%s", strings.ToLower(strings.ReplaceAll(lb.Nombre, " ", "_"))),
+		fmt.Sprintf("    bind *:%d", lb.ListenPort),
+		fmt.Sprintf("    default_backend be_%s", strings.ToLower(strings.ReplaceAll(lb.Nombre, " ", "_"))),
+		"",
+		fmt.Sprintf("backend be_%s", strings.ToLower(strings.ReplaceAll(lb.Nombre, " ", "_"))),
+		fmt.Sprintf("    balance %s", algorithm),
+	}
+
+	count := 0
+	for _, s := range lb.Servers {
+		if !s.Habilitado {
+			continue
+		}
+		ip := strings.TrimSpace(s.IP)
+		if ip == "" {
+			continue
+		}
+		port := s.Port
+		if port <= 0 {
+			port = lb.BackendPort
+		}
+		name := s.Nombre
+		if strings.TrimSpace(name) == "" {
+			name = "srv"
+		}
+		count++
+		lines = append(lines, fmt.Sprintf("    server %s_%d %s:%d check", strings.ToLower(strings.ReplaceAll(name, " ", "_")), count, ip, port))
+	}
+
+	if count == 0 {
+		lines = append(lines, "    # Sin servidores habilitados")
+	}
+
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func applyLoadBalancerConfig(lb LoadBalancer) error {
+	host, err := prepareVMUserSSHEndpoint(lb.HaproxyVM, "")
+	if err != nil {
+		return err
+	}
+
+	rootClient, rootErr := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 45*time.Second)
+	if rootErr != nil {
+		return rootErr
+	}
+	defer rootClient.Close()
+
+	if _, depErr := runSSHCommandWithOutputLoggedFromClient(rootClient, "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y haproxy"); depErr != nil {
+		return fmt.Errorf("no fue posible instalar haproxy en la VM balanceadora")
+	}
+
+	cfg := buildHAProxyConfig(lb)
+	tmpCfg := fmt.Sprintf("/tmp/haproxy_%s.cfg", strings.ToLower(strings.ReplaceAll(lb.Nombre, " ", "_")))
+	if upErr := uploadBytesOverSSH(rootClient, tmpCfg, []byte(cfg)); upErr != nil {
+		return fmt.Errorf("no fue posible subir configuración HAProxy")
+	}
+
+	applyCmd := fmt.Sprintf("install -m 644 %s /etc/haproxy/haproxy.cfg && systemctl restart haproxy && systemctl enable haproxy", shellSingleQuote(tmpCfg))
+	if _, cmdErr := runSSHCommandWithOutputLoggedFromClient(rootClient, applyCmd); cmdErr != nil {
+		return fmt.Errorf("no fue posible aplicar configuración de HAProxy")
+	}
+
+	return nil
+}
+
+func measureCPUUsageForServer(server LBServer) (float64, error) {
+	vmName := strings.TrimSpace(server.VMName)
+	if vmName == "" {
+		return 0, fmt.Errorf("servidor sin VM asociada")
+	}
+
+	host, err := prepareVMUserSSHEndpoint(vmName, "")
+	if err != nil {
+		return 0, err
+	}
+
+	var keyPath string
+	dbMutex.Lock()
+	for _, vm := range ListaUserVMs {
+		if vm.Nombre == vmName {
+			keyPath = filepath.Join(getVBoxKeysPath(), vm.NombreLlave)
+			break
+		}
+	}
+	dbMutex.Unlock()
+	if strings.TrimSpace(keyPath) == "" {
+		return 0, fmt.Errorf("no existe llave de usuario para VM %s", vmName)
+	}
+
+	privateKeyPEM, readErr := os.ReadFile(keyPath)
+	if readErr != nil {
+		return 0, readErr
+	}
+
+	userClient, userErr := waitForSSHClientWithPrivateKey(host, "usuario_mv", privateKeyPEM, 30*time.Second)
+	if userErr != nil {
+		return 0, userErr
+	}
+	defer userClient.Close()
+
+	cmd := "bash -lc \"grep '^cpu ' /proc/stat; sleep 1; grep '^cpu ' /proc/stat\" | awk 'NR==1{u=$2+$3+$4;s=$5+$6+$7+$8+$9+$10;t=u+s} NR==2{u2=$2+$3+$4;s2=$5+$6+$7+$8+$9+$10;t2=u2+s2; if (t2>t) printf \"%.2f\", (u2-u)*100/(t2-t); else print \"0\"}'"
+	out, runErr := runSSHCommandWithOutputLoggedFromClient(userClient, cmd)
+	if runErr != nil {
+		return 0, runErr
+	}
+
+	text := strings.TrimSpace(string(out))
+	var val float64
+	if _, scanErr := fmt.Sscanf(text, "%f", &val); scanErr != nil {
+		return 0, fmt.Errorf("no se pudo parsear CPU desde salida: %s", text)
+	}
+
+	return val, nil
+}
+
+func autoscalerLoop() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		dbMutex.Lock()
+		names := make([]string, 0)
+		for _, lb := range ListaBalanceadores {
+			if lb.AutoEnabled {
+				names = append(names, lb.Nombre)
+			}
+		}
+		dbMutex.Unlock()
+
+		for _, name := range names {
+			processAutoscaleForLB(name)
+		}
+	}
+}
+
+func processAutoscaleForLB(lbName string) {
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		return
+	}
+	lb := ListaBalanceadores[idx]
+	sanitizeLBDefaults(&lb)
+	st := lbRuntimeState[lbName]
+	if st == nil {
+		st = &LBRuntimeState{}
+		lbRuntimeState[lbName] = st
+	}
+	if !st.LastSampleAt.IsZero() && time.Since(st.LastSampleAt) < time.Duration(lb.SampleSeconds)*time.Second {
+		dbMutex.Unlock()
+		return
+	}
+	st.LastSampleAt = time.Now()
+	dbMutex.Unlock()
+
+	total := 0.0
+	count := 0
+	for _, srv := range lb.Servers {
+		if !srv.Habilitado {
+			continue
+		}
+		cpu, err := measureCPUUsageForServer(srv)
+		if err != nil {
+			continue
+		}
+		total += cpu
+		count++
+	}
+	if count == 0 {
+		dbMutex.Lock()
+		idx = findLBIndexByNameLocked(lbName)
+		if idx != -1 {
+			ListaBalanceadores[idx].LastAutoDetail = "No hay servidores habilitados con métrica CPU disponible"
+			_ = saveAppStateLocked()
+		}
+		dbMutex.Unlock()
+		return
+	}
+
+	avg := total / float64(count)
+	dbMutex.Lock()
+	idx = findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		return
+	}
+	ListaBalanceadores[idx].LastAvgCPU = avg
+	ListaBalanceadores[idx].LastAutoCheckTime = time.Now().Format("2006-01-02 15:04:05")
+	st = lbRuntimeState[lbName]
+	if avg >= ListaBalanceadores[idx].HighCPUThreshold {
+		st.AboveSeconds += ListaBalanceadores[idx].SampleSeconds
+		st.BelowSeconds = 0
+	} else if avg <= ListaBalanceadores[idx].LowCPUThreshold {
+		st.BelowSeconds += ListaBalanceadores[idx].SampleSeconds
+		st.AboveSeconds = 0
+	} else {
+		st.AboveSeconds = 0
+		st.BelowSeconds = 0
+	}
+	lb = ListaBalanceadores[idx]
+	dbMutex.Unlock()
+
+	if st.AboveSeconds >= lb.SustainSeconds {
+		if err := autoscaleOut(lb.Nombre); err == nil {
+			st.AboveSeconds = 0
+		} else {
+			dbMutex.Lock()
+			idx = findLBIndexByNameLocked(lbName)
+			if idx != -1 {
+				ListaBalanceadores[idx].LastAutoAction = "Scale Out Error"
+				ListaBalanceadores[idx].LastAutoDetail = err.Error()
+				_ = saveAppStateLocked()
+			}
+			dbMutex.Unlock()
+		}
+	}
+	if st.BelowSeconds >= lb.SustainSeconds {
+		if err := autoscaleIn(lb.Nombre); err == nil {
+			st.BelowSeconds = 0
+		} else {
+			dbMutex.Lock()
+			idx = findLBIndexByNameLocked(lbName)
+			if idx != -1 {
+				ListaBalanceadores[idx].LastAutoAction = "Scale In Error"
+				ListaBalanceadores[idx].LastAutoDetail = err.Error()
+				_ = saveAppStateLocked()
+			}
+			dbMutex.Unlock()
+		}
+	}
+}
+
+func autoscaleOut(lbName string) error {
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		return fmt.Errorf("balanceador no encontrado")
+	}
+	lb := ListaBalanceadores[idx]
+	sanitizeLBDefaults(&lb)
+	if len(lb.Servers) >= lb.MaxServers || strings.TrimSpace(lb.ScaleTemplateVM) == "" {
+		if len(lb.Servers) >= lb.MaxServers {
+			ListaBalanceadores[idx].LastAutoAction = "Sin cambios"
+			ListaBalanceadores[idx].LastAutoDetail = "No escala: ya alcanzó MaxServers"
+		} else {
+			ListaBalanceadores[idx].LastAutoAction = "Sin cambios"
+			ListaBalanceadores[idx].LastAutoDetail = "No escala: falta ScaleTemplateVM"
+		}
+		_ = saveAppStateLocked()
+		dbMutex.Unlock()
+		return nil
+	}
+	newVM := fmt.Sprintf("%s-%d", lb.ScaleNamePrefix, time.Now().Unix())
+	dbMutex.Unlock()
+
+	if out, err := runVBoxManageWithTimeout(vboxCreateDiskTimeout, "clonevm", lb.ScaleTemplateVM, "--name", newVM, "--register", "--mode", "all"); err != nil {
+		return fmt.Errorf("no fue posible clonar VM para escala: %s", strings.TrimSpace(string(out)))
+	}
+
+	host, err := prepareVMUserSSHEndpoint(newVM, "")
+	if err != nil {
+		return err
+	}
+	ip := strings.TrimSpace(strings.Split(host, ":")[0])
+
+	dbMutex.Lock()
+	idx = findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		return fmt.Errorf("balanceador no encontrado")
+	}
+	lb = ListaBalanceadores[idx]
+	newServer := LBServer{ID: fmt.Sprintf("srv-%d", time.Now().UnixNano()), Nombre: newVM, VMName: newVM, IP: ip, Port: lb.BackendPort, Habilitado: true, AutoCreated: true}
+	ListaBalanceadores[idx].Servers = append(ListaBalanceadores[idx].Servers, newServer)
+	ListaBalanceadores[idx].LastAutoAction = "Scale Out"
+	ListaBalanceadores[idx].LastAutoDetail = fmt.Sprintf("Nueva instancia AUTO creada: %s", newVM)
+	lb = ListaBalanceadores[idx]
+	saveErr := saveAppStateLocked()
+	dbMutex.Unlock()
+	if saveErr != nil {
+		return saveErr
+	}
+
+	return applyLoadBalancerConfig(lb)
+}
+
+func autoscaleIn(lbName string) error {
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		return fmt.Errorf("balanceador no encontrado")
+	}
+	lb := ListaBalanceadores[idx]
+	sanitizeLBDefaults(&lb)
+	if len(lb.Servers) <= lb.MinServers {
+		ListaBalanceadores[idx].LastAutoAction = "Sin cambios"
+		ListaBalanceadores[idx].LastAutoDetail = "No reduce: ya está en MinServers"
+		_ = saveAppStateLocked()
+		dbMutex.Unlock()
+		return nil
+	}
+
+	removeIdx := -1
+	for i := len(lb.Servers) - 1; i >= 0; i-- {
+		if lb.Servers[i].AutoCreated {
+			removeIdx = i
+			break
+		}
+	}
+	if removeIdx == -1 {
+		ListaBalanceadores[idx].LastAutoAction = "Sin cambios"
+		ListaBalanceadores[idx].LastAutoDetail = "No reduce: no hay instancias AUTO para eliminar"
+		_ = saveAppStateLocked()
+		dbMutex.Unlock()
+		return nil
+	}
+
+	removed := lb.Servers[removeIdx]
+	lb.Servers = append(lb.Servers[:removeIdx], lb.Servers[removeIdx+1:]...)
+	ListaBalanceadores[idx] = lb
+	ListaBalanceadores[idx].LastAutoAction = "Scale In"
+	ListaBalanceadores[idx].LastAutoDetail = fmt.Sprintf("Instancia AUTO removida: %s", strings.TrimSpace(removed.VMName))
+	saveErr := saveAppStateLocked()
+	dbMutex.Unlock()
+	if saveErr != nil {
+		return saveErr
+	}
+
+	_ = applyLoadBalancerConfig(lb)
+	if strings.TrimSpace(removed.VMName) != "" {
+		shutdownVMGracefully(removed.VMName)
+		_, _ = runVBoxManage("unregistervm", removed.VMName, "--delete")
+	}
+
+	return nil
+}
+
+func handleLBCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+
+	name := strings.TrimSpace(r.FormValue("lb_name"))
+	haproxyVM := strings.TrimSpace(r.FormValue("haproxy_vm"))
+	if name == "" || haproxyVM == "" {
+		redirectWithError(w, r, "Debes indicar nombre del balanceador y VM de HAProxy.")
+		return
+	}
+
+	lb := LoadBalancer{
+		Nombre:           name,
+		Descripcion:      strings.TrimSpace(r.FormValue("lb_desc")),
+		HaproxyVM:        haproxyVM,
+		Algoritmo:        strings.TrimSpace(r.FormValue("lb_algo")),
+		ScaleTemplateVM:  strings.TrimSpace(r.FormValue("scale_template_vm")),
+		ScaleNamePrefix:  strings.TrimSpace(r.FormValue("scale_prefix")),
+		AutoEnabled:      strings.EqualFold(strings.TrimSpace(r.FormValue("auto_enabled")), "on"),
+		LastAutoAction:   "N/A",
+		ListenPort:       8080,
+		BackendPort:      5000,
+		HighCPUThreshold: 75,
+		LowCPUThreshold:  25,
+		SustainSeconds:   60,
+		SampleSeconds:    10,
+		MinServers:       1,
+		MaxServers:       3,
+	}
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("lb_listen_port")), "%d", &lb.ListenPort)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("lb_backend_port")), "%d", &lb.BackendPort)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("high_cpu")), "%f", &lb.HighCPUThreshold)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("low_cpu")), "%f", &lb.LowCPUThreshold)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("sustain_seconds")), "%d", &lb.SustainSeconds)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("sample_seconds")), "%d", &lb.SampleSeconds)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("min_servers")), "%d", &lb.MinServers)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("max_servers")), "%d", &lb.MaxServers)
+	sanitizeLBDefaults(&lb)
+
+	dbMutex.Lock()
+	if findLBIndexByNameLocked(lb.Nombre) != -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Ya existe un balanceador con ese nombre.")
+		return
+	}
+	ListaBalanceadores = append(ListaBalanceadores, lb)
+	if err := saveAppStateLocked(); err != nil {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "No fue posible guardar el balanceador: "+err.Error())
+		return
+	}
+	dbMutex.Unlock()
+
+	redirectWithInfo(w, r, "Balanceador creado correctamente.")
+}
+
+func handleLBDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("lb_name"))
+	if name == "" {
+		redirectWithError(w, r, "Nombre de balanceador inválido.")
+		return
+	}
+
+	dbMutex.Lock()
+	nueva := make([]LoadBalancer, 0, len(ListaBalanceadores))
+	found := false
+	for _, lb := range ListaBalanceadores {
+		if !strings.EqualFold(lb.Nombre, name) {
+			nueva = append(nueva, lb)
+		} else {
+			found = true
+		}
+	}
+	if !found {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado.")
+		return
+	}
+	ListaBalanceadores = nueva
+	delete(lbRuntimeState, name)
+	if err := saveAppStateLocked(); err != nil {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "No fue posible eliminar balanceador: "+err.Error())
+		return
+	}
+	dbMutex.Unlock()
+
+	redirectWithInfo(w, r, "Balanceador eliminado.")
+}
+
+func handleLBServerAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+	lbName := strings.TrimSpace(r.FormValue("lb_name"))
+	serviceRef := strings.TrimSpace(r.FormValue("service_ref"))
+	vmName := strings.TrimSpace(r.FormValue("server_vm"))
+	ip := strings.TrimSpace(r.FormValue("server_ip"))
+	name := strings.TrimSpace(r.FormValue("server_name"))
+	port := 0
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("server_port")), "%d", &port)
+
+	if lbName == "" {
+		redirectWithError(w, r, "Datos insuficientes para agregar servidor al balanceador.")
+		return
+	}
+
+	if serviceRef != "" {
+		parts := strings.SplitN(serviceRef, "::", 2)
+		if len(parts) != 2 {
+			redirectWithError(w, r, "Referencia de servicio inválida.")
+			return
+		}
+		refVM := strings.TrimSpace(parts[0])
+		refSvc := strings.TrimSpace(parts[1])
+		if refVM == "" || refSvc == "" {
+			redirectWithError(w, r, "Referencia de servicio inválida.")
+			return
+		}
+
+		var foundSvc *ServiceDeployment
+		dbMutex.Lock()
+		for i := range ListaServicios {
+			if strings.EqualFold(strings.TrimSpace(ListaServicios[i].VMName), refVM) && strings.EqualFold(strings.TrimSpace(ListaServicios[i].ServiceName), refSvc) {
+				copySvc := ListaServicios[i]
+				foundSvc = &copySvc
+				break
+			}
+		}
+		dbMutex.Unlock()
+		if foundSvc == nil {
+			redirectWithError(w, r, "No se encontró el servicio seleccionado para agregarlo al balanceador.")
+			return
+		}
+
+		if name == "" {
+			name = strings.TrimSpace(strings.TrimSuffix(foundSvc.ServiceName, ".service"))
+			if name == "" {
+				name = strings.TrimSpace(foundSvc.ServiceName)
+			}
+		}
+		if vmName == "" {
+			vmName = strings.TrimSpace(foundSvc.VMName)
+		}
+		if ip == "" {
+			ip = strings.TrimSpace(foundSvc.AppHostPort)
+		}
+		if port <= 0 {
+			_, _ = fmt.Sscanf(strings.TrimSpace(foundSvc.AppGuestPort), "%d", &port)
+		}
+	}
+
+	if name == "" {
+		redirectWithError(w, r, "Datos insuficientes para agregar servidor al balanceador.")
+		return
+	}
+	if ip == "" && vmName != "" {
+		ip = getVMIPv4FromGuestUtils(vmName)
+	}
+	if ip == "" {
+		redirectWithError(w, r, "No se pudo resolver IP del servidor. Define IP manual o VM con Guest Additions activas.")
+		return
+	}
+
+	var lbCopy LoadBalancer
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado.")
+		return
+	}
+	if port <= 0 {
+		port = ListaBalanceadores[idx].BackendPort
+	}
+	for _, existing := range ListaBalanceadores[idx].Servers {
+		if strings.EqualFold(strings.TrimSpace(existing.IP), strings.TrimSpace(ip)) && existing.Port == port {
+			dbMutex.Unlock()
+			redirectWithInfo(w, r, "Ese servidor (IP/Puerto) ya está registrado en el balanceador.")
+			return
+		}
+	}
+	ListaBalanceadores[idx].Servers = append(ListaBalanceadores[idx].Servers, LBServer{ID: fmt.Sprintf("srv-%d", time.Now().UnixNano()), Nombre: name, VMName: vmName, IP: ip, Port: port, Habilitado: true})
+	lbCopy = ListaBalanceadores[idx]
+	if err := saveAppStateLocked(); err != nil {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "No fue posible guardar servidor en balanceador: "+err.Error())
+		return
+	}
+	dbMutex.Unlock()
+
+	if err := applyLoadBalancerConfig(lbCopy); err != nil {
+		redirectWithError(w, r, "Servidor agregado, pero falló aplicar HAProxy: "+err.Error())
+		return
+	}
+
+	redirectWithInfo(w, r, "Servidor agregado al balanceador y configuración aplicada.")
+}
+
+func handleLBServerDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+	lbName := strings.TrimSpace(r.FormValue("lb_name"))
+	serverID := strings.TrimSpace(r.FormValue("server_id"))
+	if lbName == "" || serverID == "" {
+		redirectWithError(w, r, "Datos insuficientes para eliminar servidor.")
+		return
+	}
+
+	var lbCopy LoadBalancer
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado.")
+		return
+	}
+	nueva := make([]LBServer, 0, len(ListaBalanceadores[idx].Servers))
+	removed := false
+	for _, s := range ListaBalanceadores[idx].Servers {
+		if s.ID != serverID {
+			nueva = append(nueva, s)
+		} else {
+			removed = true
+		}
+	}
+	if !removed {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Servidor no encontrado en el balanceador.")
+		return
+	}
+	ListaBalanceadores[idx].Servers = nueva
+	lbCopy = ListaBalanceadores[idx]
+	if err := saveAppStateLocked(); err != nil {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "No fue posible persistir eliminación de servidor: "+err.Error())
+		return
+	}
+	dbMutex.Unlock()
+
+	if err := applyLoadBalancerConfig(lbCopy); err != nil {
+		redirectWithError(w, r, "Servidor eliminado del estado, pero falló aplicar HAProxy: "+err.Error())
+		return
+	}
+
+	redirectWithInfo(w, r, "Servidor eliminado del balanceador.")
+}
+
+func handleLBEdit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("lb_name"))
+	if name == "" {
+		redirectWithError(w, r, "Balanceador inválido para edición.")
+		return
+	}
+
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(name)
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado.")
+		return
+	}
+	lb := ListaBalanceadores[idx]
+	lb.Descripcion = strings.TrimSpace(r.FormValue("lb_desc"))
+	lb.HaproxyVM = strings.TrimSpace(r.FormValue("haproxy_vm"))
+	lb.Algoritmo = strings.TrimSpace(r.FormValue("lb_algo"))
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("lb_listen_port")), "%d", &lb.ListenPort)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("lb_backend_port")), "%d", &lb.BackendPort)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("high_cpu")), "%f", &lb.HighCPUThreshold)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("low_cpu")), "%f", &lb.LowCPUThreshold)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("sustain_seconds")), "%d", &lb.SustainSeconds)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("sample_seconds")), "%d", &lb.SampleSeconds)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("min_servers")), "%d", &lb.MinServers)
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("max_servers")), "%d", &lb.MaxServers)
+	lb.AutoEnabled = strings.EqualFold(strings.TrimSpace(r.FormValue("auto_enabled")), "on")
+	lb.ScaleTemplateVM = strings.TrimSpace(r.FormValue("scale_template_vm"))
+	lb.ScaleNamePrefix = strings.TrimSpace(r.FormValue("scale_prefix"))
+	if lb.HaproxyVM == "" {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Debes definir la VM de HAProxy.")
+		return
+	}
+	sanitizeLBDefaults(&lb)
+	ListaBalanceadores[idx] = lb
+	if err := saveAppStateLocked(); err != nil {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "No fue posible guardar cambios del balanceador: "+err.Error())
+		return
+	}
+	dbMutex.Unlock()
+
+	if err := applyLoadBalancerConfig(lb); err != nil {
+		redirectWithError(w, r, "Balanceador actualizado, pero falló aplicar HAProxy: "+err.Error())
+		return
+	}
+
+	redirectWithInfo(w, r, "Balanceador actualizado y configuración aplicada.")
+}
+
+func handleLBApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("lb_name"))
+	if name == "" {
+		redirectWithError(w, r, "Balanceador inválido para aplicar configuración.")
+		return
+	}
+
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(name)
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado.")
+		return
+	}
+	lb := ListaBalanceadores[idx]
+	dbMutex.Unlock()
+
+	if err := applyLoadBalancerConfig(lb); err != nil {
+		redirectWithError(w, r, "No fue posible aplicar configuración de HAProxy: "+err.Error())
+		return
+	}
+
+	redirectWithInfo(w, r, "Configuración de HAProxy aplicada correctamente.")
+
+}
+
+func parseStressLevels(raw string) ([]int, error) {
+	clean := strings.ReplaceAll(strings.TrimSpace(raw), ";", ",")
+	clean = strings.ReplaceAll(clean, " ", ",")
+	parts := strings.Split(clean, ",")
+	levels := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		val := 0
+		if _, err := fmt.Sscanf(p, "%d", &val); err != nil {
+			return nil, fmt.Errorf("nivel inválido: %s", p)
+		}
+		if val < 1 || val > 100 {
+			return nil, fmt.Errorf("cada nivel debe estar entre 1 y 100")
+		}
+		levels = append(levels, val)
+	}
+	if len(levels) == 0 {
+		return nil, fmt.Errorf("debes indicar al menos un nivel de carga")
+	}
+	if len(levels) > 12 {
+		return nil, fmt.Errorf("demasiados niveles: máximo 12 por ejecución")
+	}
+	return levels, nil
+}
+
+func runStressSingleOnVM(vmName string, cpuWorkers int, cpuLoad int, durationSec int) (string, error) {
+	host, err := prepareVMUserSSHEndpoint(vmName, "")
+	if err != nil {
+		return "", err
+	}
+
+	rootClient, rootErr := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 60*time.Second)
+	if rootErr != nil {
+		return "", rootErr
+	}
+	defer rootClient.Close()
+
+	if _, depErr := runSSHCommandWithOutputLoggedFromClient(rootClient, "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y stress-ng"); depErr != nil {
+		return "", fmt.Errorf("no fue posible instalar stress-ng en la VM objetivo")
+	}
+
+	logFile := fmt.Sprintf("/tmp/stress_lb_%s_%d.log", strings.ToLower(strings.ReplaceAll(vmName, " ", "_")), time.Now().Unix())
+	inner := fmt.Sprintf("stress-ng --cpu %d --cpu-load %d --timeout %ds --metrics-brief > %s 2>&1", cpuWorkers, cpuLoad, durationSec, shellSingleQuote(logFile))
+	startCmd := fmt.Sprintf("nohup bash -lc %s >/dev/null 2>&1 &", shellSingleQuote(inner))
+	if _, cmdErr := runSSHCommandWithOutputLoggedFromClient(rootClient, startCmd); cmdErr != nil {
+		return "", fmt.Errorf("no fue posible iniciar la simulación de carga")
+	}
+
+	return logFile, nil
+}
+
+func runStressProfileOnVM(vmName string, cpuWorkers int, durationEachSec int, levels []int) (string, error) {
+	host, err := prepareVMUserSSHEndpoint(vmName, "")
+	if err != nil {
+		return "", err
+	}
+
+	rootClient, rootErr := waitForSSHClient(host, "root", []string{"1234", "nicolas"}, 60*time.Second)
+	if rootErr != nil {
+		return "", rootErr
+	}
+	defer rootClient.Close()
+
+	if _, depErr := runSSHCommandWithOutputLoggedFromClient(rootClient, "export DEBIAN_FRONTEND=noninteractive; apt-get update -y && apt-get install -y stress-ng"); depErr != nil {
+		return "", fmt.Errorf("no fue posible instalar stress-ng en la VM objetivo")
+	}
+
+	commands := make([]string, 0, len(levels))
+	for _, lvl := range levels {
+		commands = append(commands, fmt.Sprintf("stress-ng --cpu %d --cpu-load %d --timeout %ds --metrics-brief", cpuWorkers, lvl, durationEachSec))
+	}
+
+	logFile := fmt.Sprintf("/tmp/stress_profile_lb_%s_%d.log", strings.ToLower(strings.ReplaceAll(vmName, " ", "_")), time.Now().Unix())
+	profileScript := fmt.Sprintf("{ %s; } > %s 2>&1", strings.Join(commands, "; sleep 2; "), shellSingleQuote(logFile))
+	startCmd := fmt.Sprintf("nohup bash -lc %s >/dev/null 2>&1 &", shellSingleQuote(profileScript))
+	if _, cmdErr := runSSHCommandWithOutputLoggedFromClient(rootClient, startCmd); cmdErr != nil {
+		return "", fmt.Errorf("no fue posible iniciar el perfil de carga")
+	}
+
+	return logFile, nil
+}
+
+func handleLBSimulateLoad(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.ParseForm()
+
+	lbName := strings.TrimSpace(r.FormValue("lb_name"))
+	targetVM := strings.TrimSpace(r.FormValue("target_vm"))
+	targetServerID := strings.TrimSpace(r.FormValue("target_server_id"))
+	mode := strings.ToLower(strings.TrimSpace(r.FormValue("load_mode")))
+	if mode == "" {
+		mode = "single"
+	}
+
+	cpuWorkers := 2
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("cpu_workers")), "%d", &cpuWorkers)
+	if cpuWorkers < 1 {
+		cpuWorkers = 1
+	}
+	if cpuWorkers > 32 {
+		cpuWorkers = 32
+	}
+
+	durationSec := 45
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("duration_seconds")), "%d", &durationSec)
+	if durationSec < 10 {
+		durationSec = 10
+	}
+	if durationSec > 3600 {
+		durationSec = 3600
+	}
+
+	if lbName == "" {
+		redirectWithError(w, r, "Debes indicar el balanceador para la simulación.")
+		return
+	}
+
+	dbMutex.Lock()
+	idx := findLBIndexByNameLocked(lbName)
+	if idx == -1 {
+		dbMutex.Unlock()
+		redirectWithError(w, r, "Balanceador no encontrado para simulación.")
+		return
+	}
+	if targetVM == "" && targetServerID != "" {
+		for _, srv := range ListaBalanceadores[idx].Servers {
+			if strings.TrimSpace(srv.ID) == targetServerID {
+				targetVM = strings.TrimSpace(srv.VMName)
+				break
+			}
+		}
+	}
+	dbMutex.Unlock()
+
+	if targetVM == "" {
+		redirectWithError(w, r, "Debes seleccionar un servidor/VM objetivo para simular carga.")
+		return
+	}
+
+	if mode == "profile" {
+		levels, err := parseStressLevels(r.FormValue("profile_levels"))
+		if err != nil {
+			redirectWithError(w, r, "Perfil de carga inválido: "+err.Error())
+			return
+		}
+		logFile, runErr := runStressProfileOnVM(targetVM, cpuWorkers, durationSec, levels)
+		if runErr != nil {
+			redirectWithError(w, r, "No fue posible ejecutar perfil de carga: "+runErr.Error())
+			return
+		}
+		redirectWithInfo(w, r, fmt.Sprintf("Perfil de carga iniciado en VM %s (niveles=%v, %ds por nivel). Log: %s", targetVM, levels, durationSec, logFile))
+		return
+	}
+
+	cpuLoad := 60
+	_, _ = fmt.Sscanf(strings.TrimSpace(r.FormValue("cpu_load")), "%d", &cpuLoad)
+	if cpuLoad < 1 {
+		cpuLoad = 1
+	}
+	if cpuLoad > 100 {
+		cpuLoad = 100
+	}
+
+	logFile, runErr := runStressSingleOnVM(targetVM, cpuWorkers, cpuLoad, durationSec)
+	if runErr != nil {
+		redirectWithError(w, r, "No fue posible ejecutar simulación de carga: "+runErr.Error())
+		return
+	}
+
+	redirectWithInfo(w, r, fmt.Sprintf("Simulación iniciada en VM %s: cpu-load=%d%%, workers=%d, duración=%ds. Log: %s", targetVM, cpuLoad, cpuWorkers, durationSec, logFile))
 }
 
 func runServer() {
@@ -973,7 +2061,19 @@ func runServer() {
 	// Rutas para Fase 2: gestión de servicios
 	http.HandleFunc("/deploy-service", handleDeployService)
 	http.HandleFunc("/service-action", handleServiceAction)
+
+	// Rutas para Fase 3: gestión de balanceadores de carga
+	http.HandleFunc("/lb-create", handleLBCreate)
+	http.HandleFunc("/lb-edit", handleLBEdit)
+	http.HandleFunc("/lb-delete", handleLBDelete)
+	http.HandleFunc("/lb-apply", handleLBApply)
+	http.HandleFunc("/lb-server-add", handleLBServerAdd)
+	http.HandleFunc("/lb-server-delete", handleLBServerDelete)
+	http.HandleFunc("/lb-simulate-load", handleLBSimulateLoad)
+
 	http.HandleFunc("/reset-state", handleResetState)
+
+	go autoscalerLoop()
 
 	fmt.Println("Servidor corriendo en http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -990,6 +2090,8 @@ func handleResetState(w http.ResponseWriter, r *http.Request) {
 	ListaDiscos = nil
 	ListaUserVMs = nil
 	ListaServicios = nil
+	ListaBalanceadores = nil
+	lbRuntimeState = map[string]*LBRuntimeState{}
 	LlavesSshActivas = false
 	dbMutex.Unlock()
 
@@ -1011,14 +2113,19 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dbMutex.Lock()
+	totalByLB, activeByLB := buildAutoScaleCountMaps(ListaBalanceadores)
 	data := PageData{
-		Templates:     templatesDB,
-		Discos:        ListaDiscos,
-		UserVMs:       ListaUserVMs,
-		Services:      ListaServicios,
-		LlavesActivas: hasConfiguredKeys(),
-		Error:         strings.TrimSpace(r.URL.Query().Get("error")),
-		Info:          strings.TrimSpace(r.URL.Query().Get("info")),
+		Templates:           templatesDB,
+		Discos:              ListaDiscos,
+		UserVMs:             ListaUserVMs,
+		Services:            ListaServicios,
+		LoadBalancers:       ListaBalanceadores,
+		AutoScaleTotalByLB:  totalByLB,
+		AutoScaleActiveByLB: activeByLB,
+		ActiveModule:        sanitizeModuleName(r.URL.Query().Get("module")),
+		LlavesActivas:       hasConfiguredKeys(),
+		Error:               strings.TrimSpace(r.URL.Query().Get("error")),
+		Info:                strings.TrimSpace(r.URL.Query().Get("info")),
 	}
 	dbMutex.Unlock()
 	tmpl.Execute(w, data)
