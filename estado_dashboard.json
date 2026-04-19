@@ -34,20 +34,37 @@
   "services": [
     {
       "VMName": "johanprueba",
-      "ServiceName": "demo-flask3.service",
+      "ServiceName": "demo-flask.service",
       "RuntimeBinary": "python3",
-      "NatRuleName": "regla_app_demo_flask3",
-      "AppHostPort": "59884",
+      "NatRuleName": "",
+      "AppHostPort": "192.168.1.8",
       "AppGuestPort": "5000",
-      "AppEndpoint": "http://127.0.0.1:59884",
-      "DestinationPath": "/home/usuario_mv/demo_flask4",
+      "AppEndpoint": "http://192.168.1.8:5000",
+      "DestinationPath": "/home/usuario_mv/demo_flask",
       "StartCommand": "python3 app.py",
       "CounterFile": "app_runs.log",
       "ZipFilename": "demo_servicio_flask.zip",
-      "Status": "active",
+      "Status": "inactive",
       "Enabled": "disabled",
-      "LastLogTail": "1 - 2026-04-13 19:59:05\n2 - ACTION_START - 2026-04-13 19:59:05\n3 - ACTION_STOP - 2026-04-13 19:59:43\n4 - 2026-04-13 20:03:06\n5 - ACTION_START - 2026-04-13 20:03:06",
-      "LastChecked": "2026-04-13 20:03:06"
+      "LastLogTail": "1 - 2026-04-19 10:50:20\n2 - ACTION_START - 2026-04-19 10:50:20\n3 - ACTION_STOP - 2026-04-19 10:50:34",
+      "LastChecked": "2026-04-19 10:55:39"
+    },
+    {
+      "VMName": "johanprueba",
+      "ServiceName": "demo-flask2.service",
+      "RuntimeBinary": "python3",
+      "NatRuleName": "",
+      "AppHostPort": "192.168.1.8",
+      "AppGuestPort": "5000",
+      "AppEndpoint": "http://192.168.1.8:5000",
+      "DestinationPath": "/home/usuario_mv/demo_flask2",
+      "StartCommand": "python3 app.py",
+      "CounterFile": "app_runs.log",
+      "ZipFilename": "demo_servicio_flask.zip",
+      "Status": "inactive",
+      "Enabled": "disabled",
+      "LastLogTail": "",
+      "LastChecked": "2026-04-19 10:59:24"
     }
   ],
   "llaves_ssh_activas": true

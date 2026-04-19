@@ -1,0 +1,171 @@
+FLUJO DE GESTION DE SERVICIOS EN MAQUINAS VIRTUALES
+
+Nombre del estudiante
+Universidad o institución
+Curso
+Docente
+Fecha
+
+Resumen
+Este documento explica, de forma simple, cómo funciona el módulo de gestión de servicios del proyecto. Se describe cómo se configura la red para exponer la aplicación, cómo se sube un archivo ZIP a la máquina virtual, cómo se descomprime, cómo se crea el servicio para que funcione como demonio y cómo responden los botones de control del servicio. También se muestran los comandos SSH y Linux que se usan en cada parte del proceso.
+
+Palabras clave: máquina virtual, SSH, ZIP, systemd, servicio Linux, NAT
+
+1. Introducción
+En este proyecto, el objetivo es poder desplegar una aplicación dentro de una máquina virtual Linux y controlarla desde un panel web. El usuario no entra manualmente a la VM para hacer todo, sino que el sistema lo hace por SSH con comandos automáticos.
+
+En palabras sencillas: el usuario llena un formulario, sube su ZIP y el sistema se encarga del resto (copiar, descomprimir, preparar dependencias, crear servicio y controlar el estado).
+
+2. Flujo general de trabajo
+El flujo completo funciona así:
+
+1) El usuario selecciona VM, nombre de servicio, ruta de destino, comando de inicio y sube un ZIP.
+2) El sistema configura una regla de red temporal para poder entrar por SSH a esa VM.
+3) El sistema inicia la VM (si estaba apagada) y se conecta por SSH.
+4) Se instala unzip (si hace falta), se sube el ZIP y se descomprime en la ruta elegida.
+5) Se crea un script de ejecución.
+6) Si la app es Python, se crea un entorno virtual e instala requirements.txt.
+7) Se crea el archivo .service de systemd y se registra en Linux.
+8) Se crea la regla de red para exponer la app al host (127.0.0.1:puerto_host).
+9) Desde el dashboard se controla con botones: iniciar, detener, reiniciar, habilitar, deshabilitar, actualizar estado y eliminar app.
+
+3. Configuración de red de la aplicación
+Para que la app corra dentro de la VM y se vea desde Windows (host), se usa NAT Port Forwarding con VBoxManage.
+
+Primero se levanta una regla temporal de SSH para entrar a la VM:
+
+VBoxManage modifyvm <VM_NAME> --natpf1 "regla_service_ssh,tcp,127.0.0.1,<PUERTO_HOST_SSH>,,22"
+
+Después, para publicar la aplicación, se crea otra regla:
+
+VBoxManage modifyvm <VM_NAME> --natpf1 "regla_app_<SERVICIO>,tcp,127.0.0.1,<PUERTO_HOST_APP>,,<PUERTO_GUEST_APP>"
+
+Ejemplo simple de resultado:
+- VM escucha internamente en 5000
+- Host expone 127.0.0.1:50174
+- URL final: http://127.0.0.1:50174
+
+Cuando se elimina la app, se borra la regla de red de la app. La regla SSH del usuario no se debe tocar.
+
+4. Subida del ZIP a la máquina virtual
+La subida se hace por SSH hacia una ruta temporal, por ejemplo:
+
+/tmp/demo_flask_1776113785.zip
+
+Antes de descomprimir, el sistema instala unzip (si no está):
+
+apt-get update -y
+apt-get install -y unzip
+
+Luego descomprime:
+
+mkdir -p /home/usuario_mv/demo_flask && unzip -o /tmp/demo_flask_1776113785.zip -d /home/usuario_mv/demo_flask
+
+Con esto, el contenido de la app queda en la carpeta destino que el usuario escribió en el formulario.
+
+5. Preparación de ejecución y dependencias
+5.1 Script de arranque
+Se crea un script run_<servicio>.sh dentro de la carpeta de la app. Ese script:
+- entra a la carpeta,
+- escribe una línea incremental en un archivo de trazas,
+- y ejecuta el comando de inicio.
+
+5.2 Caso Python (requirements.txt)
+Para evitar errores de entorno administrado (PEP 668), no se instala con pip global. Se crea un entorno virtual:
+
+apt-get install -y python3 python3-pip python3-venv
+cd /home/usuario_mv/demo_flask
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+
+Después, la ejecución usa .venv/bin/python3.
+
+6. Configuración del servicio (demonio) con systemd
+El sistema crea un archivo como:
+
+/etc/systemd/system/miapp.service
+
+Con datos del usuario:
+- nombre del servicio,
+- carpeta destino,
+- comando de inicio.
+
+Estructura típica:
+
+[Unit]
+Description=Servicio miapp
+After=network.target
+
+[Service]
+Type=simple
+User=usuario_mv
+WorkingDirectory=/home/usuario_mv/demo_flask
+ExecStart=/bin/bash /home/usuario_mv/demo_flask/run_miapp.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
+Y se aplica con:
+
+install -m 644 /tmp/miapp.service /etc/systemd/system/miapp.service
+systemctl daemon-reload
+
+7. Botones de control del servicio en el dashboard
+Cada botón ejecuta comandos Linux por SSH:
+
+Iniciar:
+systemctl start miapp.service
+
+Detener:
+systemctl stop miapp.service
+
+Reiniciar:
+systemctl restart miapp.service
+
+Habilitar (autoarranque):
+systemctl enable miapp.service
+
+Deshabilitar:
+systemctl disable miapp.service
+
+Actualizar estado:
+systemctl is-active miapp.service
+systemctl is-enabled miapp.service
+
+Además, cada acción importante agrega una línea incremental al archivo de trazas (counter_file) para evidenciar cambios.
+
+8. Eliminación completa de la aplicación
+Cuando el usuario pulsa “Eliminar app”, el sistema hace limpieza completa:
+
+systemctl stop miapp.service
+systemctl disable miapp.service
+rm -f /etc/systemd/system/miapp.service
+systemctl daemon-reload
+rm -rf /home/usuario_mv/demo_flask
+
+También borra la regla NAT de la aplicación y el registro local del dashboard.
+
+9. Manejo de errores y limpieza
+Si algo falla a mitad del despliegue, el sistema intenta rollback:
+- elimina archivos temporales,
+- elimina reglas NAT de app que se alcanzaron a crear,
+- elimina carpeta parcial,
+- evita dejar configuración a medias.
+
+Esto ayuda a que el siguiente intento no falle por basura de intentos anteriores.
+
+10. Conclusiones
+El módulo de gestión de servicios automatiza casi todo el trabajo manual de despliegue en Linux dentro de VM. El usuario solo llena el formulario y usa botones de control. Internamente se usan comandos SSH, Linux y systemd para completar el proceso.
+
+En resumen, este flujo permite:
+- desplegar rápido,
+- controlar servicios desde un panel,
+- y mantener evidencia de acciones en archivos de trazas.
+
+Referencias (formato APA 7 sugerido)
+Oracle. (s. f.). Oracle VM VirtualBox User Manual. https://www.virtualbox.org/manual/
+The Linux man-pages project. (s. f.). systemctl(1). https://www.freedesktop.org/software/systemd/man/systemctl.html
+Python Software Foundation. (s. f.). venv — Creation of virtual environments. https://docs.python.org/3/library/venv.html

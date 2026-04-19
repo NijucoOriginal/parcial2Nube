@@ -162,7 +162,12 @@ func normalizeLoadedStateLocked() {
 		hostPort := strings.TrimSpace(ListaServicios[i].AppHostPort)
 		if hostPort != "" {
 			if strings.TrimSpace(ListaServicios[i].AppEndpoint) == "" {
-				ListaServicios[i].AppEndpoint = fmt.Sprintf("http://127.0.0.1:%s", hostPort)
+				guestPort := strings.TrimSpace(ListaServicios[i].AppGuestPort)
+				if guestPort == "" {
+					ListaServicios[i].AppEndpoint = fmt.Sprintf("http://%s", hostPort)
+				} else {
+					ListaServicios[i].AppEndpoint = fmt.Sprintf("http://%s:%s", hostPort, guestPort)
+				}
 			}
 			if strings.TrimSpace(ListaServicios[i].AppGuestPort) == "" {
 				ListaServicios[i].AppGuestPort = inferGuestAppPortForRuntime(ListaServicios[i].StartCommand, ListaServicios[i].RuntimeBinary)
@@ -650,21 +655,119 @@ func buildServiceNatRuleName(serviceName string) string {
 	return "regla_app_" + safe
 }
 
-func prepareVMUserSSHEndpoint(vmName string, ruleName string) (string, error) {
-	port, err := getFreeLocalPort()
+func getDefaultBridgeAdapterName() (string, error) {
+	out, err := runVBoxManage("list", "bridgedifs")
 	if err != nil {
 		return "", err
 	}
 
-	rule := ruleName
-	if rule == "" {
-		rule = "regla_service_ssh"
+	nameRegex := regexp.MustCompile(`(?im)^Name:\s*(.+)$`)
+	matches := nameRegex.FindStringSubmatch(string(out))
+	if len(matches) < 2 {
+		return "", fmt.Errorf("no se encontró un adaptador puente disponible en el host")
 	}
-	deleteNatRuleIfExistsRuntimeAware(vmName, rule)
 
-	if err := setNatRuleRuntimeAware(vmName, fmt.Sprintf("%s,tcp,127.0.0.1,%s,,22", rule, port)); err != nil {
-		return "", fmt.Errorf("no fue posible configurar NAT PF para SSH: %s", err.Error())
+	adapterName := strings.TrimSpace(matches[1])
+	if adapterName == "" {
+		return "", fmt.Errorf("el nombre del adaptador puente detectado es inválido")
 	}
+
+	return adapterName, nil
+}
+
+func ensureVMBridgeNetworking(vmName string) error {
+	bridgeAdapter, err := getDefaultBridgeAdapterName()
+	if err != nil {
+		return err
+	}
+
+	isLockErr := func(detail string) bool {
+		d := strings.ToLower(strings.TrimSpace(detail))
+		return strings.Contains(d, "already locked for a session") || strings.Contains(d, "being unlocked") || strings.Contains(d, "vbox_e_invalid_object_state")
+	}
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		if out, err := runVBoxManage("modifyvm", vmName, "--nic1", "bridged", "--bridgeadapter1", bridgeAdapter, "--cableconnected1", "on"); err == nil {
+			return nil
+		} else {
+			detail := strings.TrimSpace(string(out))
+			if isLockErr(detail) {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if !isVMPoweredOff(vmName) {
+				// VM encendida: aplicar en caliente con controlvm.
+				if outNic, errNic := runVBoxManage("controlvm", vmName, "nic1", "bridged"); errNic != nil {
+					detailNic := strings.TrimSpace(string(outNic))
+					if isLockErr(detailNic) {
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					return fmt.Errorf("no fue posible configurar nic1 en bridged para VM %s: %s", vmName, detailNic)
+				}
+
+				if outBridge, errBridge := runVBoxManage("controlvm", vmName, "bridgeadapter1", bridgeAdapter); errBridge != nil {
+					detailBridge := strings.TrimSpace(string(outBridge))
+					if isLockErr(detailBridge) {
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					return fmt.Errorf("no fue posible aplicar bridgeadapter1 en caliente para VM %s: %s", vmName, detailBridge)
+				}
+
+				_, _ = runVBoxManage("controlvm", vmName, "setlinkstate1", "on")
+				return nil
+			}
+
+			return fmt.Errorf("no fue posible configurar adaptador puente para la VM %s: %s", vmName, detail)
+		}
+	}
+
+	return fmt.Errorf("no fue posible configurar adaptador puente para la VM %s tras varios reintentos por bloqueo de sesión", vmName)
+}
+
+func getVMIPv4FromGuestUtils(vmName string) string {
+	for idx := 0; idx < 8; idx++ {
+		prop := fmt.Sprintf("/VirtualBox/GuestInfo/Net/%d/V4/IP", idx)
+		out, err := runVBoxManage("guestproperty", "get", vmName, prop)
+		if err != nil {
+			continue
+		}
+
+		text := strings.TrimSpace(string(out))
+		if text == "" || strings.Contains(strings.ToLower(text), "no value set") {
+			continue
+		}
+
+		ipRegex := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)`)
+		match := ipRegex.FindStringSubmatch(text)
+		if len(match) >= 2 {
+			ip := strings.TrimSpace(match[1])
+			if ip != "" && ip != "0.0.0.0" {
+				return ip
+			}
+		}
+	}
+
+	return ""
+}
+
+func waitForVMIPv4FromGuestUtils(vmName string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ip := getVMIPv4FromGuestUtils(vmName)
+		if ip != "" {
+			return ip, nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	return "", fmt.Errorf("no fue posible obtener la IP de la VM usando Guest Additions dentro del tiempo esperado")
+}
+
+func prepareVMUserSSHEndpoint(vmName string, ruleName string) (string, error) {
+	_ = ruleName
 
 	if out, err := runVBoxManage("startvm", vmName, "--type", "headless"); err != nil {
 		msg := strings.ToLower(strings.TrimSpace(string(out)))
@@ -673,7 +776,12 @@ func prepareVMUserSSHEndpoint(vmName string, ruleName string) (string, error) {
 		}
 	}
 
-	return fmt.Sprintf("127.0.0.1:%s", port), nil
+	ip, ipErr := waitForVMIPv4FromGuestUtils(vmName, 90*time.Second)
+	if ipErr != nil {
+		return "", ipErr
+	}
+
+	return fmt.Sprintf("%s:22", ip), nil
 }
 
 func uploadBytesOverSSH(client *ssh.Client, remotePath string, data []byte) error {
@@ -987,23 +1095,11 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		if t.Nombre == nombrePlantilla && !t.LlaveGenerada {
 
 			rootPassword := "1234"
-			vmIP := "127.0.0.1"
-			vmPort := "2224"
-
-			fmt.Printf("Preparando red para MV: %s...\n", t.PlantillaBase)
-			runVBoxManage("modifyvm", t.PlantillaBase, "--natpf1", "delete", "regla_ssh")
-
-			if outPort, errPort := runVBoxManage("modifyvm", t.PlantillaBase, "--natpf1", "regla_ssh,tcp,127.0.0.1,2224,,22"); errPort != nil {
-				fmt.Printf("Advertencia al configurar puerto: %v\nDetalles: %s\n", errPort, string(outPort))
+			host, hostErr := prepareVMUserSSHEndpoint(t.PlantillaBase, "")
+			if hostErr != nil {
+				renderIndexWithErrorLocked(w, "No fue posible preparar red puente para la máquina virtual base: "+hostErr.Error())
+				return
 			}
-
-			fmt.Printf("Encendiendo MV: %s...\n", t.PlantillaBase)
-			if outStart, err := runVBoxManage("startvm", t.PlantillaBase, "--type", "headless"); err != nil {
-				fmt.Printf("Error al encender MV: %v\nDetalles: %s\n", err, string(outStart))
-			}
-
-			fmt.Println("Esperando a que la MV inicie (60 segundos)...")
-			time.Sleep(60 * time.Second)
 
 			privateKey, _ := rsa.GenerateKey(rand.Reader, 3072)
 			nombreLlavePrivada := fmt.Sprintf("rsa_%s.pem", t.Nombre)
@@ -1027,7 +1123,7 @@ func handleCreateKey(w http.ResponseWriter, r *http.Request) {
 				Timeout:         10 * time.Second,
 			}
 
-			target := fmt.Sprintf("%s:%s", vmIP, vmPort)
+			target := host
 			log.Printf("[CMD][SSH] Dial directo -> host=%s user=root", target)
 			client, err := ssh.Dial("tcp", target, sshConfig)
 			if err != nil {
@@ -1506,7 +1602,7 @@ func handleCreateUserVM(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Println("MV Nueva creada y registrada exitosamente.")
 
-	if outResources, errResources := runVBoxManage("modifyvm", nombreMV, "--memory", "2048", "--cpus", "2", "--nic1", "nat"); errResources != nil {
+	if outResources, errResources := runVBoxManage("modifyvm", nombreMV, "--memory", "2048", "--cpus", "2"); errResources != nil {
 		fmt.Printf("Advertencia al configurar recursos de la MV: %v\nDetalles: %s\n", errResources, string(outResources))
 	}
 
@@ -1609,23 +1705,11 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 	}
 	dbMutex.Unlock()
 
-	vmIP := "127.0.0.1"
-	vmPort, portErr := getFreeLocalPort()
-	if portErr != nil {
-		renderIndexWithErrorLocked(w, "No fue posible reservar un puerto local para SSH de la MV de usuario.")
+	host, hostErr := prepareVMUserSSHEndpoint(mv.Nombre, "")
+	if hostErr != nil {
+		renderIndexWithErrorLocked(w, "No fue posible preparar red puente para la MV de usuario: "+hostErr.Error())
 		return
 	}
-
-	fmt.Printf("Configurando red para MV de Usuario: %s...\n", mv.Nombre)
-	runVBoxManage("modifyvm", mv.Nombre, "--natpf1", "delete", "regla_ssh")
-	runVBoxManage("modifyvm", mv.Nombre, "--natpf1", "delete", "regla_ssh_user")
-	if out, err := runVBoxManage("modifyvm", mv.Nombre, "--natpf1", fmt.Sprintf("regla_ssh_user,tcp,127.0.0.1,%s,,22", vmPort)); err != nil {
-		renderIndexWithErrorLocked(w, "No fue posible configurar el reenvío SSH para la MV de usuario: "+strings.TrimSpace(string(out)))
-		return
-	}
-
-	fmt.Printf("Encendiendo MV de Usuario: %s...\n", mv.Nombre)
-	runVBoxManage("startvm", mv.Nombre, "--type", "headless")
 
 	privateKey, _ := rsa.GenerateKey(rand.Reader, 3072)
 	nombreLlavePrivada := fmt.Sprintf("rsa_user_%s.pem", mv.Nombre)
@@ -1637,7 +1721,6 @@ func handleCreateUserKey(w http.ResponseWriter, r *http.Request) {
 	publicRsaKey, _ := ssh.NewPublicKey(&privateKey.PublicKey)
 	pubKeyBytes := ssh.MarshalAuthorizedKey(publicRsaKey)
 
-	host := fmt.Sprintf("%s:%s", vmIP, vmPort)
 	passwords := []string{"1234", "nicolas"}
 	client, err := waitForSSHClient(host, "root", passwords, sshBootTimeout)
 	if err != nil {
@@ -1815,28 +1898,11 @@ func handleVerifyUserAccess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vmPort, portErr := getFreeLocalPort()
-	if portErr != nil {
-		redirectWithError(w, r, "No fue posible reservar un puerto local para verificación SSH.")
+	host, hostErr := prepareVMUserSSHEndpoint(vm.Nombre, "")
+	if hostErr != nil {
+		redirectWithError(w, r, "No fue posible preparar red puente para la verificación SSH: "+hostErr.Error())
 		return
 	}
-
-	runVBoxManage("modifyvm", vm.Nombre, "--natpf1", "delete", "regla_ssh_user")
-	runVBoxManage("modifyvm", vm.Nombre, "--natpf1", "delete", "regla_ssh_user_verify")
-	if out, err := runVBoxManage("modifyvm", vm.Nombre, "--natpf1", fmt.Sprintf("regla_ssh_user_verify,tcp,127.0.0.1,%s,,22", vmPort)); err != nil {
-		redirectWithError(w, r, "No fue posible configurar reenvío SSH para la verificación: "+strings.TrimSpace(string(out)))
-		return
-	}
-
-	if out, err := runVBoxManage("startvm", vm.Nombre, "--type", "headless"); err != nil {
-		msg := strings.ToLower(strings.TrimSpace(string(out)))
-		if !strings.Contains(msg, "already") && !strings.Contains(msg, "running") {
-			redirectWithError(w, r, "No fue posible iniciar la MV para verificar acceso SSH: "+strings.TrimSpace(string(out)))
-			return
-		}
-	}
-
-	host := fmt.Sprintf("127.0.0.1:%s", vmPort)
 	verifyClient, verifyErr := waitForSSHClientWithPrivateKey(host, "usuario_mv", llavePEM, sshBootTimeout)
 	if verifyErr != nil {
 		logFlow("VERIFY-USER-ACCESS", "Fallo autenticación por llave vm=%s: %v", nombreMV, verifyErr)
@@ -1927,8 +1993,6 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmWasRunning := !isVMPoweredOff(vmName)
-	natRuleName := buildServiceNatRuleName(serviceName)
-	sshRuleName := "regla_service_ssh"
 	tmpService := fmt.Sprintf("/tmp/%s", serviceName)
 	remoteZip := ""
 	runScriptPath := ""
@@ -1979,7 +2043,7 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host, hostErr := prepareVMUserSSHEndpoint(vmName, sshRuleName)
+	host, hostErr := prepareVMUserSSHEndpoint(vmName, "")
 	if hostErr != nil {
 		redirectWithError(w, r, hostErr.Error())
 		return
@@ -1995,9 +2059,6 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 		if deployCompleted {
 			return
 		}
-
-		deleteNatRuleIfExistsRuntimeAware(vmName, natRuleName)
-		deleteNatRuleIfExistsRuntimeAware(vmName, sshRuleName)
 
 		if rootClient != nil {
 			if cleanupService {
@@ -2097,34 +2158,8 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 	cleanupService = true
 
 	appGuestPort := inferGuestAppPortForRuntime(startCommand, runtimeBinary)
-
-	dbMutex.Lock()
-	previousHostPort := ""
-	for _, s := range ListaServicios {
-		if s.VMName == vmName && s.ServiceName == serviceName && strings.TrimSpace(s.AppHostPort) != "" {
-			previousHostPort = strings.TrimSpace(s.AppHostPort)
-			break
-		}
-	}
-	dbMutex.Unlock()
-
-	appHostPort := previousHostPort
-	if appHostPort == "" {
-		generatedHostPort, portErr := getFreeLocalPort()
-		if portErr != nil {
-			redirectWithError(w, r, "No fue posible reservar un puerto local para exponer la aplicación.")
-			return
-		}
-		appHostPort = generatedHostPort
-	}
-
-	deleteNatRuleIfExistsRuntimeAware(vmName, natRuleName)
-	appRuleSpec := fmt.Sprintf("%s,tcp,127.0.0.1,%s,,%s", natRuleName, appHostPort, appGuestPort)
-	if err := setNatRuleRuntimeAware(vmName, appRuleSpec); err != nil {
-		redirectWithError(w, r, "No fue posible configurar el reenvío automático de puertos para la aplicación: "+err.Error())
-		return
-	}
-	appEndpoint := fmt.Sprintf("http://127.0.0.1:%s", appHostPort)
+	vmIP := strings.TrimSpace(strings.Split(host, ":")[0])
+	appEndpoint := fmt.Sprintf("http://%s:%s", vmIP, appGuestPort)
 
 	statusOut, _ := runSSHCommandWithOutputLoggedFromClient(rootClient, fmt.Sprintf("systemctl is-active %s 2>/dev/null || true", shellSingleQuote(serviceName)))
 	enabledOut, _ := runSSHCommandWithOutputLoggedFromClient(rootClient, fmt.Sprintf("systemctl is-enabled %s 2>/dev/null || true", shellSingleQuote(serviceName)))
@@ -2135,8 +2170,8 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 		VMName:          vmName,
 		ServiceName:     serviceName,
 		RuntimeBinary:   runtimeBinary,
-		NatRuleName:     natRuleName,
-		AppHostPort:     appHostPort,
+		NatRuleName:     "",
+		AppHostPort:     vmIP,
 		AppGuestPort:    appGuestPort,
 		AppEndpoint:     appEndpoint,
 		DestinationPath: destination,
@@ -2154,7 +2189,6 @@ func handleDeployService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dbMutex.Unlock()
-	deleteNatRuleIfExistsRuntimeAware(vmName, sshRuleName)
 	deployCompleted = true
 
 	redirectWithInfo(w, r, "Despliegue completado: ZIP cargado, servicio instalado y puerto de aplicación publicado en "+appEndpoint+"."+dependencyInstallMsg)
@@ -2204,7 +2238,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host, hostErr := prepareVMUserSSHEndpoint(vmName, "regla_service_ssh")
+	host, hostErr := prepareVMUserSSHEndpoint(vmName, "")
 	if hostErr != nil {
 		logFlow("SERVICE-ACTION", "Error preparando endpoint SSH vm=%s servicio=%s err=%v", vmName, serviceName, hostErr)
 		redirectWithError(w, r, hostErr.Error())
@@ -2219,7 +2253,6 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rootClient.Close()
-	defer deleteNatRuleIfExistsRuntimeAware(vmName, "regla_service_ssh")
 
 	if action == "delete-app" {
 		logFlow("SERVICE-ACTION", "Eliminando aplicación vm=%s servicio=%s", vmName, serviceName)
@@ -2230,12 +2263,6 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			redirectWithError(w, r, "No fue posible eliminar completamente servicio/carpeta de la aplicación.")
 			return
 		}
-
-		natRuleName := strings.TrimSpace(dep.NatRuleName)
-		if natRuleName == "" {
-			natRuleName = buildServiceNatRuleName(serviceName)
-		}
-		deleteNatRuleIfExistsRuntimeAware(vmName, natRuleName)
 
 		dbMutex.Lock()
 		nuevaLista := make([]ServiceDeployment, 0, len(ListaServicios))
@@ -2258,7 +2285,7 @@ func handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		}
 
 		logFlow("SERVICE-ACTION", "Aplicación eliminada vm=%s servicio=%s", vmName, serviceName)
-		redirectWithInfo(w, r, "Aplicación eliminada: servicio, carpeta y configuración de red removidos.")
+		redirectWithInfo(w, r, "Aplicación eliminada: servicio y carpeta removidos.")
 		return
 	}
 
