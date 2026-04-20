@@ -261,8 +261,9 @@
       {{end}}
 
       <div class="module-nav">
-        <a class="module-link" href="#mod-vm">Módulo 1: Gestión de Máquinas Virtuales</a>
-        <a class="module-link" href="#mod-services">Módulo 2: Gestión de Servicios</a>
+        <a class="module-link" href="/?module=vm">Módulo 1: Gestión de Máquinas Virtuales</a>
+        <a class="module-link" href="/?module=services">Módulo 2: Gestión de Servicios</a>
+        <a class="module-link" href="/?module=lb">Módulo 3: Balanceadores de Carga</a>
       </div>
 
       <div class="state-tools">
@@ -277,6 +278,7 @@
         </form>
       </div>
 
+      {{if eq .ActiveModule "vm"}}
       <div class="module-block" id="mod-vm">
         <div class="module-header">
           <h2>Módulo 1: Gestión de Máquinas Virtuales</h2>
@@ -796,7 +798,9 @@
       </section>
 
       </div>
+      {{end}}
 
+      {{if eq .ActiveModule "services"}}
       <div class="module-block" id="mod-services">
         <div class="module-header">
           <h2>Módulo 2: Gestión de Servicios</h2>
@@ -951,6 +955,279 @@
         </div>
       </section>
       </div>
+      {{end}}
+
+      {{if eq .ActiveModule "lb"}}
+      <div class="module-block" id="mod-lb">
+        <div class="module-header">
+          <h2>Módulo 3: Gestión de Balanceadores de Carga</h2>
+          <p>
+            Administra balanceadores con HAProxy, servidores de aplicación y elasticidad automática
+            según consumo de CPU.
+          </p>
+          <p style="margin-top: 0.3rem; color: var(--text-muted); font-size: 0.85rem;">
+            Vista dinámica: esta sección se actualiza automáticamente cada 8 segundos.
+          </p>
+        </div>
+
+      <section>
+        <h2>Crear Balanceador de Carga</h2>
+        <form action="/lb-create" method="POST" style="background-color: var(--bg-dark); padding: 1.5rem; border-radius: 8px; margin-bottom: 2rem;">
+          <div class="form-group">
+            <label for="lb_name">Nombre del balanceador</label>
+            <input type="text" id="lb_name" name="lb_name" required placeholder="lb-web-1" />
+          </div>
+          <div class="form-group">
+            <label for="lb_desc">Descripción</label>
+            <input type="text" id="lb_desc" name="lb_desc" placeholder="Balanceador para frontend web" />
+          </div>
+          <div class="form-group">
+            <label for="haproxy_vm">VM donde corre HAProxy</label>
+            <select id="haproxy_vm" name="haproxy_vm" required>
+              <option value="" disabled selected>Selecciona una VM...</option>
+              {{range .UserVMs}}
+              <option value="{{.Nombre}}">{{.Nombre}}</option>
+              {{end}}
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="lb_algo">Algoritmo</label>
+            <select id="lb_algo" name="lb_algo">
+              <option value="roundrobin" selected>roundrobin</option>
+              <option value="leastconn">leastconn</option>
+              <option value="source">source</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="lb_listen_port">Puerto de escucha del balanceador</label>
+            <input type="text" id="lb_listen_port" name="lb_listen_port" placeholder="8080" />
+          </div>
+          <div class="form-group">
+            <label for="lb_backend_port">Puerto backend de las apps</label>
+            <input type="text" id="lb_backend_port" name="lb_backend_port" placeholder="5000" />
+          </div>
+          <h3 style="margin-bottom: 0.8rem">Elasticidad automática</h3>
+          <div class="form-group">
+            <label><input type="checkbox" name="auto_enabled" style="margin-right: 0.4rem" /> Habilitar autoscaling</label>
+          </div>
+          <div class="form-group">
+            <label for="high_cpu">Umbral alto CPU (%)</label>
+            <input type="text" id="high_cpu" name="high_cpu" placeholder="75" />
+          </div>
+          <div class="form-group">
+            <label for="low_cpu">Umbral bajo CPU (%)</label>
+            <input type="text" id="low_cpu" name="low_cpu" placeholder="25" />
+          </div>
+          <div class="form-group">
+            <label for="sustain_seconds">Tiempo de sostén (segundos)</label>
+            <input type="text" id="sustain_seconds" name="sustain_seconds" placeholder="60" />
+          </div>
+          <div class="form-group">
+            <label for="sample_seconds">Frecuencia de muestreo (segundos)</label>
+            <input type="text" id="sample_seconds" name="sample_seconds" placeholder="10" />
+          </div>
+          <div class="form-group">
+            <label for="min_servers">Mínimo de servidores</label>
+            <input type="text" id="min_servers" name="min_servers" placeholder="1" />
+          </div>
+          <div class="form-group">
+            <label for="max_servers">Máximo de servidores</label>
+            <input type="text" id="max_servers" name="max_servers" placeholder="3" />
+          </div>
+          <div class="form-group">
+            <label for="scale_template_vm">VM plantilla para escalar</label>
+            <select id="scale_template_vm" name="scale_template_vm">
+              <option value="" selected>Sin plantilla (manual)</option>
+              {{range .UserVMs}}
+              <option value="{{.Nombre}}">{{.Nombre}}</option>
+              {{end}}
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="scale_prefix">Prefijo de VM autoescalada</label>
+            <input type="text" id="scale_prefix" name="scale_prefix" placeholder="auto-app" />
+          </div>
+          <button type="submit" class="btn btn-primary">Crear Balanceador</button>
+        </form>
+
+        <h2>Balanceadores Registrados</h2>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>HAProxy VM</th>
+                <th>Escucha</th>
+                <th>CPU promedio</th>
+                <th>Autoscaling</th>
+                <th>Última acción</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .LoadBalancers}}
+              <tr>
+                <td>{{.Nombre}}</td>
+                <td>{{.HaproxyVM}}</td>
+                <td>{{.ListenPort}}</td>
+                <td>{{printf "%.2f" .LastAvgCPU}}%</td>
+                <td>{{if .AutoEnabled}}Activo{{else}}Inactivo{{end}}</td>
+                <td>{{if .LastAutoAction}}{{.LastAutoAction}}{{else}}N/A{{end}}</td>
+                <td class="actions-cell">
+                  <form action="/lb-apply" method="POST" style="display:inline">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <button class="btn btn-accent" type="submit">Aplicar HAProxy</button>
+                  </form>
+                  <form action="/lb-delete" method="POST" style="display:inline">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <button class="btn btn-danger" type="submit" onclick="return confirm('¿Eliminar balanceador {{.Nombre}}?');">Eliminar</button>
+                  </form>
+                </td>
+              </tr>
+              <tr>
+                <td colspan="7" style="background: rgba(0, 0, 0, 0.15)">
+                  <strong>Config:</strong> backend={{.BackendPort}}, algoritmo={{.Algoritmo}}, high={{.HighCPUThreshold}}%, low={{.LowCPUThreshold}}%, sustain={{.SustainSeconds}}s, sample={{.SampleSeconds}}s, min={{.MinServers}}, max={{.MaxServers}}<br />
+                  <strong>Última verificación:</strong> {{if .LastAutoCheckTime}}{{.LastAutoCheckTime}}{{else}}-{{end}}
+                  <br /><strong>Detalle autoscaling:</strong> {{if .LastAutoDetail}}{{.LastAutoDetail}}{{else}}Sin detalle{{end}}
+                  <hr style="border-color: var(--border); margin: 0.8rem 0" />
+                  <strong>Editar balanceador</strong>
+                  <form action="/lb-edit" method="POST" style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <input type="text" name="lb_desc" value="{{.Descripcion}}" placeholder="Descripción" style="width: 170px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="haproxy_vm" value="{{.HaproxyVM}}" placeholder="VM HAProxy" style="width: 140px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <select name="lb_algo" style="width: 130px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                      <option value="roundrobin" {{if eq .Algoritmo "roundrobin"}}selected{{end}}>roundrobin</option>
+                      <option value="leastconn" {{if eq .Algoritmo "leastconn"}}selected{{end}}>leastconn</option>
+                      <option value="source" {{if eq .Algoritmo "source"}}selected{{end}}>source</option>
+                    </select>
+                    <input type="text" name="lb_listen_port" value="{{.ListenPort}}" placeholder="Listen" style="width: 80px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="lb_backend_port" value="{{.BackendPort}}" placeholder="Backend" style="width: 80px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="high_cpu" value="{{printf "%.2f" .HighCPUThreshold}}" placeholder="CPU high" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="low_cpu" value="{{printf "%.2f" .LowCPUThreshold}}" placeholder="CPU low" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="sustain_seconds" value="{{.SustainSeconds}}" placeholder="Sustain" style="width: 80px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="sample_seconds" value="{{.SampleSeconds}}" placeholder="Sample" style="width: 80px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="min_servers" value="{{.MinServers}}" placeholder="Min" style="width: 70px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="max_servers" value="{{.MaxServers}}" placeholder="Max" style="width: 70px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="scale_template_vm" value="{{.ScaleTemplateVM}}" placeholder="VM plantilla" style="width: 120px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="scale_prefix" value="{{.ScaleNamePrefix}}" placeholder="Prefijo" style="width: 100px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.85rem;">
+                      <input type="checkbox" name="auto_enabled" {{if .AutoEnabled}}checked{{end}} /> Auto
+                    </label>
+                    <button class="btn btn-primary" type="submit">Guardar cambios</button>
+                  </form>
+                  <hr style="border-color: var(--border); margin: 0.8rem 0" />
+                  <strong>Agregar servidor de aplicación</strong>
+                  <form action="/lb-server-add" method="POST" style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <input type="text" name="server_name" required placeholder="Nombre servidor" style="width: 160px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="server_vm" placeholder="VM (opcional)" style="width: 160px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="server_ip" placeholder="IP (opcional)" style="width: 140px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="server_port" placeholder="Puerto" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <button class="btn btn-accent" type="submit">Agregar servidor</button>
+                  </form>
+                  <div style="margin-top: 0.6rem; color: var(--text-muted); font-size: 0.85rem;">
+                    También puedes seleccionar un servicio ya configurado en el módulo de servicios.
+                  </div>
+                  {{if $.Services}}
+                  <form action="/lb-server-add" method="POST" style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.4rem; align-items: center;">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <select name="service_ref" style="min-width: 300px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" required>
+                      <option value="" disabled selected>Selecciona un servicio desplegado...</option>
+                      {{range $.Services}}
+                      <option value="{{.VMName}}::{{.ServiceName}}">{{.ServiceName}} | VM={{.VMName}} | IP={{if .AppHostPort}}{{.AppHostPort}}{{else}}(pendiente){{end}} | Puerto={{if .AppGuestPort}}{{.AppGuestPort}}{{else}}(auto){{end}}</option>
+                      {{end}}
+                    </select>
+                    <input type="text" name="server_name" placeholder="Alias opcional" style="width: 150px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <button class="btn btn-primary" type="submit">Agregar desde servicio</button>
+                  </form>
+                  {{else}}
+                  <div style="margin-top: 0.4rem; color: var(--text-muted); font-size: 0.85rem;">
+                    Aún no hay servicios desplegados para listar aquí.
+                  </div>
+                  {{end}}
+                  <div style="margin-top: 0.8rem;">
+                    <strong>Servidores:</strong>
+                    {{$lb := .}}
+                    {{if .Servers}}
+                      {{range .Servers}}
+                        <div style="margin-top: 0.4rem; display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap;">
+                          <span>{{.Nombre}} | {{.IP}}:{{.Port}} | VM={{if .VMName}}{{.VMName}}{{else}}-{{end}} | {{if .Habilitado}}ON{{else}}OFF{{end}} | {{if .AutoCreated}}AUTO{{else}}MANUAL{{end}}</span>
+                          <form action="/lb-server-delete" method="POST" style="display:inline">
+                            <input type="hidden" name="lb_name" value="{{$lb.Nombre}}" />
+                            <input type="hidden" name="server_id" value="{{.ID}}" />
+                            <button class="btn btn-danger" type="submit">Eliminar servidor</button>
+                          </form>
+                        </div>
+                      {{end}}
+                    {{else}}
+                      <span style="color: var(--text-muted)">Sin servidores registrados.</span>
+                    {{end}}
+                  </div>
+                  <div style="margin-top: 0.8rem; padding: 0.7rem; border: 1px solid var(--border); border-radius: 6px;">
+                    <strong>Instancias creadas por autoescalado</strong><br />
+                    <span style="color: var(--text-muted); font-size: 0.85rem;">
+                      Total AUTO: {{index $.AutoScaleTotalByLB .Nombre}} | Activas (AUTO + ON): {{index $.AutoScaleActiveByLB .Nombre}}
+                    </span>
+                    <div style="margin-top: 0.5rem;">
+                      {{range .Servers}}
+                        {{if .AutoCreated}}
+                        <div style="margin-top: 0.35rem;">
+                          <span>{{.Nombre}} | VM={{if .VMName}}{{.VMName}}{{else}}-{{end}} | {{.IP}}:{{.Port}} | Estado={{if .Habilitado}}ACTIVA{{else}}INACTIVA{{end}}</span>
+                        </div>
+                        {{end}}
+                      {{end}}
+                    </div>
+                  </div>
+                  <hr style="border-color: var(--border); margin: 0.8rem 0" />
+                  <strong>Simulación de carga (stress-ng)</strong>
+                  <div style="margin-top: 0.3rem; color: var(--text-muted); font-size: 0.85rem;">
+                    Ejecuta carga de CPU para validar respuesta del autoscaling con diferentes umbrales.
+                  </div>
+                  <form action="/lb-simulate-load" method="POST" style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <input type="hidden" name="load_mode" value="single" />
+                    <select name="target_server_id" style="min-width: 240px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                      <option value="" selected>Servidor del balanceador (opcional)</option>
+                      {{range .Servers}}
+                      <option value="{{.ID}}">{{.Nombre}} | VM={{if .VMName}}{{.VMName}}{{else}}(sin VM){{end}} | {{.IP}}:{{.Port}}</option>
+                      {{end}}
+                    </select>
+                    <input type="text" name="target_vm" placeholder="VM objetivo (si no eliges servidor)" style="width: 220px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="cpu_load" placeholder="CPU % (ej 70)" style="width: 120px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="cpu_workers" placeholder="Workers" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="duration_seconds" placeholder="Segundos" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <button class="btn btn-accent" type="submit">Simular carga única</button>
+                  </form>
+                  <form action="/lb-simulate-load" method="POST" style="display: inline-flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.4rem; align-items: center;">
+                    <input type="hidden" name="lb_name" value="{{.Nombre}}" />
+                    <input type="hidden" name="load_mode" value="profile" />
+                    <select name="target_server_id" style="min-width: 240px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                      <option value="" selected>Servidor del balanceador (opcional)</option>
+                      {{range .Servers}}
+                      <option value="{{.ID}}">{{.Nombre}} | VM={{if .VMName}}{{.VMName}}{{else}}(sin VM){{end}} | {{.IP}}:{{.Port}}</option>
+                      {{end}}
+                    </select>
+                    <input type="text" name="target_vm" placeholder="VM objetivo (si no eliges servidor)" style="width: 220px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="profile_levels" placeholder="Niveles % (ej 25,60,90)" style="width: 180px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="cpu_workers" placeholder="Workers" style="width: 90px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <input type="text" name="duration_seconds" placeholder="Seg/ nivel" style="width: 100px; padding: 0.4rem; font-size: 0.85rem; background: var(--bg-dark); border: 1px solid var(--border); color: white; border-radius: 4px;" />
+                    <button class="btn btn-primary" type="submit">Simular perfil de carga</button>
+                  </form>
+                </td>
+              </tr>
+              {{else}}
+              <tr>
+                <td colspan="7" style="text-align:center; color: var(--text-muted)">
+                  No hay balanceadores creados aún.
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      </div>
+      {{end}}
     </div>
 
     <script>
@@ -965,16 +1242,33 @@
 
         elementoBoton.classList.add("selected");
       }
-
-      document
-        .getElementById("form-plantilla")
-        .addEventListener("submit", function (evento) {
-          const inputBase = document.getElementById("base").value;
-          if (inputBase === "") {
+      const formPlantilla = document.getElementById("form-plantilla");
+      if (formPlantilla) {
+        formPlantilla.addEventListener("submit", function (evento) {
+          const baseInput = document.getElementById("base");
+          const errorBase = document.getElementById("error-base");
+          const inputBase = baseInput ? baseInput.value : "";
+          if (inputBase === "" && errorBase) {
             evento.preventDefault();
-            document.getElementById("error-base").style.display = "block";
+            errorBase.style.display = "block";
           }
         });
+      }
+
+      {{if eq .ActiveModule "lb"}}
+      // Refresco silencioso solo para el módulo de balanceadores.
+      setInterval(function () {
+        const active = document.activeElement;
+        if (active) {
+          const tag = (active.tagName || "").toLowerCase();
+          const typingField = tag === "input" || tag === "textarea" || tag === "select";
+          if (typingField) {
+            return;
+          }
+        }
+        window.location.reload();
+      }, 8000);
+      {{end}}
     </script>
   </body>
 </html>

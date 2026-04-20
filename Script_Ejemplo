@@ -1,0 +1,184 @@
+@echo off
+setlocal enabledelayedexpansion
+
+echo ====================================================================
+echo SCRIPT PARA TRANSFERIR ARCHIVOS ENTRE LA MAQUINA FISICA Y LA VIRTUAL
+echo ====================================================================
+
+:: ===== CONFIGURACION =====
+set "vma=Debi"
+set "rutaGeneral=%USERPROFILE%\VirtualBox VMs"
+set "vdiPath=%rutaGeneral%\miDiscoExterno2.vdi"
+set "direccionIp="
+set "usuarioMV=johan"
+
+:: ===== 1) Crear el disco virtual si no existe =====
+echo.
+echo 1) Creando el disco virtual...
+IF EXIST "%vdiPath%" (
+    echo El disco ya existe. Se omite la creacion.
+) ELSE (
+    VBoxManage createmedium disk ^
+        --filename "%vdiPath%" ^
+        --size 2000 ^
+        --format VDI ^
+        --variant Standard >nul 2>&1
+    IF %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] No se pudo crear el disco virtual.
+        exit /b 1
+    )
+    echo Disco virtual creado correctamente.
+)
+
+:: ===== 2) Montar el disco a la MV si no esta adjunto =====
+echo.
+echo 2) Montando el disco a la MV...
+VBoxManage showvminfo "%vma%" --machinereadable 2>nul | findstr /I "miDiscoExterno2" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo El disco ya esta adjunto. Se omite este paso.
+) ELSE (
+    VBoxManage showvminfo "%vma%" --machinereadable 2>nul | findstr /I "VMState=\"running\"" >nul 2>&1
+    IF %ERRORLEVEL% EQU 0 (
+        echo La MV esta corriendo. Apagandola para adjuntar el disco...
+        VBoxManage controlvm "%vma%" acpipowerbutton >nul 2>&1
+        timeout /t 15 >nul
+    )
+    VBoxManage showvminfo "%vma%" --machinereadable 2>nul | findstr /I "VMState=\"saved\"" >nul 2>&1
+    IF %ERRORLEVEL% EQU 0 (
+        echo La MV esta en estado guardado. Descartando estado...
+        VBoxManage discardstate "%vma%" >nul 2>&1
+    )
+    VBoxManage storageattach "%vma%" ^
+        --storagectl "SATA" ^
+        --port 1 ^
+        --device 0 ^
+        --type hdd ^
+        --medium "%vdiPath%" >nul 2>&1
+    IF %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] No se pudo adjuntar el disco. Verifique que el puerto SATA 1 este libre.
+        exit /b 1
+    )
+    echo Disco adjuntado correctamente.
+)
+
+:: ===== 3) Verificar si la MV esta corriendo, si no, encenderla =====
+echo.
+echo 3) Verificando estado de la MV...
+VBoxManage showvminfo "%vma%" --machinereadable 2>nul | findstr /I "VMState=\"running\"" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo La MV ya esta corriendo. Continuando...
+    goto SKIP_START
+)
+VBoxManage showvminfo "%vma%" --machinereadable 2>nul | findstr /I "VMState=\"saved\"" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo La MV esta en estado guardado. Restaurando...
+    VBoxManage startvm "%vma%" --type gui >nul 2>&1
+    goto WAIT_BOOT
+)
+echo La MV esta apagada. Iniciando en modo gui...
+VBoxManage startvm "%vma%" --type gui >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] No se pudo iniciar la MV "%vma%".
+    exit /b 1
+)
+
+:WAIT_BOOT
+echo Esperando que la MV arranque completamente...
+set "bootIntentos=0"
+:RETRY_BOOT
+timeout /t 10 >nul
+set /a bootIntentos+=1
+VBoxManage guestproperty get "%vma%" "/VirtualBox/GuestInfo/OS/LoggedInUsers" 2>nul | findstr /I "Value:" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo La MV ha arrancado correctamente.
+    goto SKIP_START
+)
+IF !bootIntentos! LSS 12 (
+    echo Esperando arranque... !bootIntentos!/12
+    goto RETRY_BOOT
+)
+echo [ERROR] La MV no termino de arrancar en el tiempo esperado.
+exit /b 1
+
+:SKIP_START
+
+:: ===== 4) Obtener la IP de la MV =====
+echo.
+echo 4) Obteniendo la IP de la MV...
+set "intentos=0"
+:RETRY_IP
+set "direccionIp="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "& { $out = & 'VBoxManage' guestproperty get '%vma%' '/VirtualBox/GuestInfo/Net/0/V4/IP' 2>$null; if ($out -match 'Value:\s*(\d+\.\d+\.\d+\.\d+)') { $matches[1] } else { '' } }"`) do (
+    set "direccionIp=%%I"
+)
+if not "!direccionIp!"=="" (
+    echo IP obtenida: !direccionIp!
+    goto IP_OK
+)
+set /a intentos+=1
+IF !intentos! LSS 12 (
+    echo Esperando IP... intento !intentos!/12
+    timeout /t 10 >nul
+    goto RETRY_IP
+)
+echo [ERROR] No se pudo obtener la IP.
+exit /b 1
+:IP_OK
+
+:: CORRECCION CLAVE: IP a variable simple para que SSH la expanda correctamente
+set "IP_MV=%direccionIp%"
+
+:: ===== 5) Esperar que SSH este listo =====
+echo.
+echo 5) Verificando que SSH este disponible...
+set "sshIntentos=0"
+:RETRY_SSH
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes %usuarioMV%@%IP_MV% "exit" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo SSH disponible. Continuando...
+    goto SSH_OK
+)
+set /a sshIntentos+=1
+IF !sshIntentos! LSS 6 (
+    echo Esperando SSH... intento !sshIntentos!/6
+    timeout /t 10 >nul
+    goto RETRY_SSH
+)
+echo [ERROR] No se pudo conectar por SSH a %IP_MV%
+echo Verifique con: sudo systemctl status ssh
+exit /b 1
+:SSH_OK
+
+:: ===== 6) Verificar si el disco ya esta montado =====
+echo.
+echo 6) Verificando si el disco ya esta montado...
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes %usuarioMV%@%IP_MV% "mountpoint -q /mnt/externo && echo YA_MONTADO || echo NO_MONTADO" > "%TEMP%\checkMount.txt" 2>&1
+findstr /I "YA_MONTADO" "%TEMP%\checkMount.txt" >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    echo El disco ya esta montado en /mnt/externo. Se omite el formateo.
+    goto DISCO_LISTO
+)
+echo El disco no esta montado. Procediendo...
+
+:: ===== 7) Formatear y montar el disco via SSH =====
+echo.
+echo 7) Formateando y montando el disco externo en la MV...
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes %usuarioMV%@%IP_MV% "DISCO=$(lsblk -dpno NAME,TYPE | awk '$2==\"disk\"{print $1}' | grep -v sda | tail -1); if [ -z \"$DISCO\" ]; then echo '[ERROR] No se encontro disco secundario'; exit 1; fi; echo \"Disco detectado: $DISCO\"; sudo parted -s $DISCO mklabel gpt mkpart primary ext4 0%% 100%% && sleep 2 && sudo mkfs.ext4 -F ${DISCO}1 && sudo mkdir -p /mnt/externo && sudo mount ${DISCO}1 /mnt/externo && sudo chown %usuarioMV%:%usuarioMV% /mnt/externo && echo 'Disco montado en /mnt/externo'"
+IF %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Fallo el formateo o montaje del disco.
+    exit /b 1
+)
+
+:DISCO_LISTO
+echo.
+echo ====================================================================
+echo Script finalizado correctamente.
+echo Disco disponible en la MV en: /mnt/externo
+echo.
+echo Para copiar archivos al disco virtual:
+echo   scp archivo.txt %usuarioMV%@%IP_MV%:/mnt/externo/
+echo Para copiar archivos desde el disco virtual:
+echo   scp %usuarioMV%@%IP_MV%:/mnt/externo/archivo.txt .
+echo ====================================================================
+exit /b 0
+

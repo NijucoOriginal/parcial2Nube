@@ -34,20 +34,54 @@
   "services": [
     {
       "VMName": "johanprueba",
-      "ServiceName": "demo-flask3.service",
+      "ServiceName": "demo-flask.service",
       "RuntimeBinary": "python3",
-      "NatRuleName": "regla_app_demo_flask3",
-      "AppHostPort": "59884",
+      "NatRuleName": "regla_app_demo_flask",
+      "AppHostPort": "192.168.1.8",
       "AppGuestPort": "5000",
-      "AppEndpoint": "http://127.0.0.1:59884",
-      "DestinationPath": "/home/usuario_mv/demo_flask4",
+      "AppEndpoint": "http://192.168.1.8:5000",
+      "DestinationPath": "/home/usuario_mv/demo_flask",
       "StartCommand": "python3 app.py",
       "CounterFile": "app_runs.log",
       "ZipFilename": "demo_servicio_flask.zip",
       "Status": "active",
       "Enabled": "disabled",
-      "LastLogTail": "1 - 2026-04-13 19:59:05\n2 - ACTION_START - 2026-04-13 19:59:05\n3 - ACTION_STOP - 2026-04-13 19:59:43\n4 - 2026-04-13 20:03:06\n5 - ACTION_START - 2026-04-13 20:03:06",
-      "LastChecked": "2026-04-13 20:03:06"
+      "LastLogTail": "1 - 2026-04-19 10:50:20\n2 - ACTION_START - 2026-04-19 10:50:20\n3 - ACTION_STOP - 2026-04-19 10:50:34\n4 - 2026-04-19 14:08:12\n5 - ACTION_START - 2026-04-19 14:08:12",
+      "LastChecked": "2026-04-19 14:08:13"
+    }
+  ],
+  "load_balancers": [
+    {
+      "Nombre": "id-web-01",
+      "Descripcion": "Balanceador de Frontend",
+      "HaproxyVM": "johanprueba",
+      "ListenPort": 8080,
+      "BackendPort": 5000,
+      "Algoritmo": "roundrobin",
+      "Servers": [
+        {
+          "ID": "srv-1776657777219487600",
+          "Nombre": "demo-flask",
+          "VMName": "johanprueba",
+          "IP": "192.168.1.8",
+          "Port": 5000,
+          "Habilitado": true,
+          "AutoCreated": false
+        }
+      ],
+      "AutoEnabled": true,
+      "HighCPUThreshold": 40,
+      "LowCPUThreshold": 25,
+      "SustainSeconds": 60,
+      "SampleSeconds": 10,
+      "ScaleTemplateVM": "johanprueba",
+      "ScaleNamePrefix": "auto-app",
+      "MinServers": 1,
+      "MaxServers": 3,
+      "LastAvgCPU": 5,
+      "LastAutoAction": "Sin cambios",
+      "LastAutoDetail": "No reduce: ya está en MinServers",
+      "LastAutoCheckTime": "2026-04-19 23:19:17"
     }
   ],
   "llaves_ssh_activas": true
